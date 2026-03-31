@@ -1,4 +1,15 @@
-import { useEffect, useRef, useState, forwardRef, KeyboardEventHandler, Dispatch, SetStateAction, ClipboardEventHandler } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  forwardRef,
+  KeyboardEventHandler,
+  Dispatch,
+  SetStateAction,
+  ClipboardEventHandler,
+  DragEventHandler,
+  TextareaHTMLAttributes
+} from 'react'
 import { Input, Popover, Whisper } from 'rsuite'
 import { init, SearchIndex } from 'emoji-mart'
 import { data } from 'src/utils/emojiData'
@@ -6,11 +17,15 @@ import { CustomEmojiCategory } from 'src/entities/emoji'
 import { MegalodonInterface } from 'megalodon'
 import { PrependParameters } from 'rsuite/esm/internals/types/utils'
 
-export type ArgProps = {
+export type ArgProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'onChange'> & {
   client: MegalodonInterface
   emojis: Array<CustomEmojiCategory>
   onChange: (value: string) => void
   onPaste?: ClipboardEventHandler<any>
+  onDragEnter?: DragEventHandler<any>
+  onDragOver?: DragEventHandler<any>
+  onDragLeave?: DragEventHandler<any>
+  onDrop?: DragEventHandler<any>
 }
 
 type SuggestItem = {
@@ -159,7 +174,7 @@ const AutoCompleteTextarea: React.ForwardRefRenderFunction<HTMLTextAreaElement, 
 
   return (
     <>
-      <Input {...props} as="textarea" ref={ref} onChange={onChange} onKeyDown={onKeyDown} />
+      <Input {...(props as any)} as="textarea" ref={ref} onChange={onChange} onKeyDown={onKeyDown} />
       <Whisper
         placement="bottomStart"
         speaker={({ className, left, top }, ref) => (

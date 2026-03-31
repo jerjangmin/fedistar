@@ -17,5 +17,6 @@ app_menu:
   cut: Cut
   copy: Copy
   paste: Paste
+  select_all: Selecionar tudo
 media:
   title: Mídia

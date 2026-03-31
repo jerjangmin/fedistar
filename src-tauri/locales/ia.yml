@@ -17,5 +17,6 @@ app_menu:
   cut: Taliar
   copy: Copiar
   paste: Collar
+  select_all: Seliger toto
 media:
   title: Multimedia

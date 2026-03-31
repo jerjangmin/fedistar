@@ -368,18 +368,12 @@ export default function TimelineColumn(props: Props) {
   const loadMore = useCallback(async () => {
     if (!appending.current) return
     console.debug('appending', props.timeline)
-    let maxId = null
-    switch (props.timeline.kind) {
-      case 'favourites':
-      case 'bookmarks':
-        if (!nextMaxId) {
-          return
-        }
-        maxId = nextMaxId
-        break
-      default:
-        maxId = statuses[statuses.length - 1].id
-        break
+    const maxId =
+      props.timeline.kind === 'favourites' || props.timeline.kind === 'bookmarks'
+        ? nextMaxId
+        : statuses[statuses.length - 1]?.id
+    if (!maxId) {
+      return
     }
 
     try {

@@ -2,8 +2,8 @@ import { Icon } from '@rsuite/icons'
 import { Entity, MegalodonInterface } from 'megalodon'
 import { useEffect, useState } from 'react'
 import { BsCheck2, BsX } from 'react-icons/bs'
-import { FormattedMessage } from 'react-intl'
-import { Avatar, Button, FlexboxGrid, Input, List, Modal, InputPicker } from 'rsuite'
+import { useIntl } from 'react-intl'
+import { Avatar, Button, FlexboxGrid, Input, List, Loader, Modal } from 'rsuite'
 import emojify from 'src/utils/emojify'
 
 type Props = {
@@ -14,19 +14,57 @@ type Props = {
 }
 
 export default function ListMemberships(props: Props) {
+  const { formatMessage } = useIntl()
   const [accounts, setAccounts] = useState<Array<Entity.Account>>([])
+  const [searchKeyword, setSearchKeyword] = useState('')
+  const [searching, setSearching] = useState(false)
   const [title, setTitle] = useState('')
   const [users, setUsers] = useState<Array<Entity.Account>>([])
 
   useEffect(() => {
     if (props.list && props.client) {
       setTitle(props.list.title)
-      const f = async () => {
-        await reload(props.list.id)
-      }
-      f()
+      setSearchKeyword('')
+      setUsers([])
+      void reload(props.list.id)
     }
   }, [props.list, props.client])
+
+  useEffect(() => {
+    const keyword = searchKeyword.trim()
+    if (keyword.length === 0) {
+      setUsers([])
+      setSearching(false)
+      return
+    }
+
+    let active = true
+    setSearching(true)
+    const timer = setTimeout(() => {
+      void props.client
+        .searchAccount(keyword, { following: true, resolve: true })
+        .then(res => {
+          if (!active) {
+            return
+          }
+
+          setUsers(res.data)
+        })
+        .catch(error => {
+          console.error(error)
+        })
+        .finally(() => {
+          if (active) {
+            setSearching(false)
+          }
+        })
+    }, 300)
+
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [props.client, searchKeyword])
 
   const reload = async (listID: string) => {
     const res = await props.client.getAccountsInList(listID)
@@ -38,19 +76,21 @@ export default function ListMemberships(props: Props) {
     await reload(props.list.id)
   }
 
-  const updateListTitle = async () => {
-    await props.client.updateList(props.list.id, title)
+  const updateListTitle = () => {
+    void props.client.updateList(props.list.id, title)
   }
 
-  const onSearch = async (keyword: string) => {
-    const res = await props.client.searchAccount(keyword, { following: true, resolve: true })
-    setUsers(res.data)
-  }
-
-  const onSelect = async (value: string) => {
-    await props.client.addAccountsToList(props.list.id, [value])
-    setUsers([])
-    await reload(props.list.id)
+  const onSelect = (value: string) => {
+    void props.client
+      .addAccountsToList(props.list.id, [value])
+      .then(() => {
+        setUsers([])
+        setSearchKeyword('')
+        return reload(props.list.id)
+      })
+      .catch(error => {
+        console.error(error)
+      })
   }
 
   return (
@@ -68,18 +108,29 @@ export default function ListMemberships(props: Props) {
             <Icon as={BsCheck2} />
           </Button>
         </div>
-        <InputPicker
-          placeholder={<FormattedMessage id="list_memberships.search_placeholder" />}
-          data={users}
-          labelKey="acct"
-          valueKey="id"
-          style={{ width: '100%' }}
-          onSearch={onSearch}
-          onSelect={onSelect}
+        <Input
+          placeholder={formatMessage({ id: 'list_memberships.search_placeholder' })}
+          value={searchKeyword}
+          onChange={value => setSearchKeyword(value)}
         />
       </Modal.Header>
       <Modal.Body>
         <div>
+          {searchKeyword.trim().length > 0 && (
+            <List bordered>
+              {searching ? (
+                <List.Item style={{ textAlign: 'center' }}>
+                  <Loader />
+                </List.Item>
+              ) : (
+                users.map(user => (
+                  <List.Item key={user.id} style={{ cursor: 'pointer' }} onClick={() => onSelect(user.id)}>
+                    @{user.acct}
+                  </List.Item>
+                ))
+              )}
+            </List>
+          )}
           <List>
             {accounts.map((account, index) => (
               <List.Item key={index} style={{ padding: 0 }}>

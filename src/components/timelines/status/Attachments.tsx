@@ -5,9 +5,10 @@ import { Icon } from '@rsuite/icons'
 import { BsCaretRightFill, BsVolumeUp } from 'react-icons/bs'
 import { useState } from 'react'
 import { FormattedMessage } from 'react-intl'
-import emptyPreview from 'src/black.png'
 import { ColumnWidth } from 'src/entities/timeline'
 import ImageContextMenu from 'src/components/media/ImageContextMenu'
+import { attachmentAlt, attachmentPreviewSrc, isImageAttachment } from 'src/utils/mediaAttachment'
+import { preloadPlayableMedia } from 'src/utils/mediaPlayback'
 
 type Props = {
   attachments: Array<Entity.Attachment>
@@ -105,9 +106,22 @@ type AttachmentProps = {
 
 const Attachment: React.FC<AttachmentProps> = props => {
   const { media, remains } = props
+  const warmPlayableMedia = () => {
+    if (media.type !== 'gifv' && media.type !== 'video') {
+      return
+    }
+
+    void preloadPlayableMedia(media.url).catch(err => {
+      console.error(err)
+    })
+  }
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div
+      style={{ position: 'relative', width: '100%', height: '100%' }}
+      onMouseEnter={warmPlayableMedia}
+      onFocus={warmPlayableMedia}
+    >
       {(media.type === 'gifv' || media.type === 'video') && (
         <IconButton
           icon={<Icon as={BsCaretRightFill} />}
@@ -124,14 +138,14 @@ const Attachment: React.FC<AttachmentProps> = props => {
           style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}
         />
       )}
-      {media.type === 'image' ? (
+      {isImageAttachment(media) ? (
         <ImageContextMenu imageUrl={media.url}>
           <div style={{ position: 'relative', width: '100%', height: '100%' }}>
             <Image
               fill
-              src={previewImage(media)}
-              alt={media.description ? media.description : media.id}
-              title={media.description ? media.description : media.id}
+              src={attachmentPreviewSrc(media)}
+              alt={attachmentAlt(media)}
+              title={attachmentAlt(media)}
               onClick={() => props.openMedia(media)}
               style={{ objectFit: 'cover', cursor: 'pointer', borderRadius: '4px' }}
             />
@@ -159,30 +173,15 @@ const Attachment: React.FC<AttachmentProps> = props => {
       ) : (
         <Image
           fill
-          src={previewImage(media)}
-          alt={media.description ? media.description : media.id}
-          title={media.description ? media.description : media.id}
+          src={attachmentPreviewSrc(media)}
+          alt={attachmentAlt(media)}
+          title={attachmentAlt(media)}
           onClick={() => props.openMedia(media)}
           style={{ objectFit: 'cover', cursor: 'pointer', borderRadius: '4px' }}
         />
       )}
     </div>
   )
-}
-
-const previewImage = (media: Entity.Attachment) => {
-  if (media.preview_url && media.preview_url.length > 0) {
-    switch (media.type) {
-      case 'gifv':
-      case 'video':
-      case 'audio':
-        return emptyPreview
-      default:
-        return media.preview_url
-    }
-  } else {
-    return emptyPreview
-  }
 }
 
 export default Attachments

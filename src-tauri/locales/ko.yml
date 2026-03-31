@@ -17,5 +17,6 @@ app_menu:
   cut: 잘라내기
   copy: 복사
   paste: 붙여넣기
+  select_all: 모두 선택
 media:
   title: 미디어

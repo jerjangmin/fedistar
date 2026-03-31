@@ -4,7 +4,7 @@ import { useRouter } from 'next/router'
 import { useCallback, useState } from 'react'
 import { BsSearch, BsPeople, BsHash, BsChatQuote, BsBackspace } from 'react-icons/bs'
 import { FormattedMessage, useIntl } from 'react-intl'
-import { Input, InputGroup, List, Avatar, Form, Loader, Accordion } from 'rsuite'
+import { Input, InputGroup, List, Avatar, Loader, Accordion } from 'rsuite'
 import { Server } from 'src/entities/server'
 import Status from 'src/components/timelines/status/Status'
 import emojify from 'src/utils/emojify'
@@ -38,16 +38,23 @@ export default function Results(props: Props) {
   const [loadingHashtag, setLoadingHashtag] = useState<boolean>(false)
   const [loading, setLoading] = useState<boolean>(false)
 
-  const search = async (word: string) => {
+  const search = (word: string) => {
     setLoading(true)
-    const res = await props.client.search(word, { limit: 5, resolve: true })
-    setSearchedWord(word)
-    setAccounts(res.data.accounts)
-    setHashtags(res.data.hashtags)
-    setStatuses(res.data.statuses)
-    const emojis = await props.client.getInstanceCustomEmojis()
-    setCustomEmojis(mapCustomEmojiCategory(props.server.domain, emojis.data))
-    setLoading(false)
+    void (async () => {
+      const res = await props.client.search(word, { limit: 5, resolve: true })
+      setSearchedWord(word)
+      setAccounts(res.data.accounts)
+      setHashtags(res.data.hashtags)
+      setStatuses(res.data.statuses)
+      const emojis = await props.client.getInstanceCustomEmojis()
+      setCustomEmojis(mapCustomEmojiCategory(props.server.domain, emojis.data))
+    })()
+      .catch(error => {
+        console.error(error)
+      })
+      .finally(() => {
+        setLoading(false)
+      })
   }
 
   const loadMoreAccount = useCallback(async () => {
@@ -126,21 +133,24 @@ export default function Results(props: Props) {
   return (
     <>
       <div style={{ margin: '12px 0' }}>
-        <Form onCheck={() => search(word)}>
-          <InputGroup inside>
-            <Input placeholder={formatMessage({ id: 'search.placeholder' })} value={word} onChange={value => setWord(value)} />
+        <InputGroup inside>
+          <Input
+            onChange={value => setWord(value)}
+            onPressEnter={() => search(word)}
+            placeholder={formatMessage({ id: 'search.placeholder' })}
+            value={word}
+          />
 
-            {word === searchedWord ? (
-              <InputGroup.Button onClick={() => clear()} title={formatMessage({ id: 'search.clear' })}>
-                <Icon as={BsBackspace} />
-              </InputGroup.Button>
-            ) : (
-              <InputGroup.Button onClick={() => search(word)} title={formatMessage({ id: 'search.search' })}>
-                <Icon as={BsSearch} />
-              </InputGroup.Button>
-            )}
-          </InputGroup>
-        </Form>
+          {word === searchedWord ? (
+            <InputGroup.Button onClick={() => clear()} title={formatMessage({ id: 'search.clear' })}>
+              <Icon as={BsBackspace} />
+            </InputGroup.Button>
+          ) : (
+            <InputGroup.Button onClick={() => search(word)} title={formatMessage({ id: 'search.search' })}>
+              <Icon as={BsSearch} />
+            </InputGroup.Button>
+          )}
+        </InputGroup>
       </div>
       {loading ? (
         <div style={{ padding: '1em 0', textAlign: 'center' }}>

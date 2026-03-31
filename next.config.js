@@ -2,8 +2,8 @@
 
 const nextConfig = {
   output: 'export',
+  productionBrowserSourceMaps: true,
   reactStrictMode: true,
-  swcMinify: false,
   images: {
     unoptimized: true
   },

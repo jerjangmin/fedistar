@@ -28,18 +28,30 @@ export default function Search(props: Props) {
   const [client, setClient] = useState<MegalodonInterface>()
 
   useEffect(() => {
-    const f = async () => {
-      const accounts = await invoke<Array<[Account, Server]>>('list_accounts')
-      setAccounts(accounts)
+    let active = true
 
-      const usual = accounts.find(([a, _]) => a.usual)
-      if (usual) {
-        setFromAccount(usual)
-      } else {
-        setFromAccount(accounts[0])
-      }
+    void invoke<Array<[Account, Server]>>('list_accounts')
+      .then(accounts => {
+        if (!active) {
+          return
+        }
+
+        setAccounts(accounts)
+
+        const usual = accounts.find(([a]) => a.usual)
+        if (usual) {
+          setFromAccount(usual)
+        } else {
+          setFromAccount(accounts[0])
+        }
+      })
+      .catch(error => {
+        console.error(error)
+      })
+
+    return () => {
+      active = false
     }
-    f()
   }, [props.servers])
 
   useEffect(() => {
@@ -50,10 +62,13 @@ export default function Search(props: Props) {
     setClient(client)
   }, [fromAccount])
 
-  const selectAccount = async (eventKey: string) => {
+  const selectAccount = (eventKey: string) => {
     const account = accounts[parseInt(eventKey)]
+    if (!account) {
+      return
+    }
     setFromAccount(account)
-    await invoke('set_usual_account', { id: account[0].id })
+    void invoke('set_usual_account', { id: account[0].id })
   }
 
   return (

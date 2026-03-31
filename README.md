@@ -76,8 +76,13 @@ And install Node.js.
 $ git clone git@github.com:h3poteto/fedistar.git
 $ cd fedistar
 $ pnpm install
-$ pnpm tauri dev
+$ pnpm tauri:dev
 ```
+
+### Retrospectives
+
+- Drag-and-drop attachment incident (2026-03-30):
+  [docs/retrospectives/2026-03-30-drag-drop-attachment-fix.md](docs/retrospectives/2026-03-30-drag-drop-attachment-fix.md)
 
 ## Sponsors
 Fedistar is free software. We don't monetize with advertisement. So your donation supports this project.
