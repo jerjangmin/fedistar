@@ -1,5 +1,5 @@
 import { Container, Header, Content, FlexboxGrid, Dropdown, Avatar } from 'rsuite'
-import { DragEventHandler, useEffect, useState } from 'react'
+import { DragEventHandler, useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import generator, { MegalodonInterface } from 'megalodon'
 
@@ -9,6 +9,7 @@ import { Account } from 'src/entities/account'
 import failoverImg from 'src/utils/failoverImg'
 import Status from './Status'
 import { FormattedMessage } from 'react-intl'
+import { collectDroppedFiles, hasDraggedFiles } from './dragDrop'
 
 export const renderAccountIcon = (props: any, ref: any, account: [Account, Server] | undefined) => {
   if (account && account.length > 0) {
@@ -47,57 +48,76 @@ const Compose: React.FC<Props> = props => {
   const [defaultLanguage, setDefaultLanguage] = useState<string | null>(null)
   const [client, setClient] = useState<MegalodonInterface>()
   const [draggingAttachment, setDraggingAttachment] = useState(false)
-  const [attachmentDropHandler, setAttachmentDropHandler] = useState<((files: Array<File>) => Promise<void>) | null>(null)
-  const [dragDepth, setDragDepth] = useState(0)
+  const [attachmentDropHandler, setAttachmentDropHandler] = useState<((files: Array<File>) => void) | null>(null)
+  const dragDepthRef = useRef(0)
+
+  const registerAttachmentDropHandler = useCallback((handler: ((files: Array<File>) => void) | null) => {
+    setAttachmentDropHandler(() => handler)
+  }, [])
 
   useEffect(() => {
-    const f = async () => {
-      const accounts = await invoke<Array<[Account, Server]>>('list_accounts')
-      setAccounts(accounts)
+    let active = true
 
-      const usual = accounts.find(([a, _]) => a.usual)
-      if (usual) {
-        setFromAccount(usual)
-      } else {
-        setFromAccount(accounts[0])
-      }
+    void invoke<Array<[Account, Server]>>('list_accounts')
+      .then(accounts => {
+        if (!active) {
+          return
+        }
+
+        setAccounts(accounts)
+
+        const usual = accounts.find(([a]) => a.usual)
+        if (usual) {
+          setFromAccount(usual)
+        } else {
+          setFromAccount(accounts[0])
+        }
+      })
+      .catch(error => {
+        console.error(error)
+      })
+
+    return () => {
+      active = false
     }
-    f()
   }, [props.servers])
 
   useEffect(() => {
     if (!fromAccount || fromAccount.length < 2) {
       return
     }
+
+    let active = true
     const client = generator(fromAccount[1].sns, fromAccount[1].base_url, fromAccount[0].access_token, USER_AGENT)
     setClient(client)
-    const f = async () => {
-      const res = await client.verifyAccountCredentials()
-      if (res.data.source) {
+
+    void client
+      .verifyAccountCredentials()
+      .then(res => {
+        if (!active || !res.data.source) {
+          return
+        }
+
         setDefaultVisibility(res.data.source.privacy as 'public' | 'unlisted' | 'private' | 'direct' | 'local')
         setDefaultNSFW(res.data.source.sensitive)
         setDefaultLanguage(res.data.source.language)
-      }
+      })
+      .catch(error => {
+        console.error(error)
+      })
+
+    return () => {
+      active = false
     }
-    f()
   }, [fromAccount])
 
-  const selectAccount = async (eventKey: string) => {
+  const selectAccount = (eventKey: string) => {
     const account = accounts[parseInt(eventKey)]
+    if (!account) {
+      return
+    }
     setFromAccount(account)
-    await invoke('set_usual_account', { id: account[0].id })
-  }
-
-  const hasDraggedFiles = (dataTransfer: DataTransfer) => {
-    if (dataTransfer.files.length > 0) {
-      return true
-    }
-
-    if (Array.from(dataTransfer.items ?? []).some(item => item.kind === 'file')) {
-      return true
-    }
-
-    return Array.from(dataTransfer.types).some(type => type === 'Files' || type === 'public.file-url')
+    void invoke('set_usual_account', { id: account[0].id })
   }
 
   const attachmentDragEnter: DragEventHandler<HTMLDivElement> = event => {
@@ -106,7 +126,8 @@ const Compose: React.FC<Props> = props => {
     }
 
     event.preventDefault()
-    setDragDepth(current => current + 1)
+    event.stopPropagation()
+    dragDepthRef.current += 1
     setDraggingAttachment(true)
   }
 
@@ -116,6 +137,7 @@ const Compose: React.FC<Props> = props => {
     }
 
     event.preventDefault()
+    event.stopPropagation()
     event.dataTransfer.dropEffect = 'copy'
   }
 
@@ -125,36 +147,29 @@ const Compose: React.FC<Props> = props => {
     }
 
     event.preventDefault()
-    setDragDepth(current => {
-      const nextDepth = Math.max(0, current - 1)
-      if (nextDepth === 0) {
-        setDraggingAttachment(false)
-      }
-      return nextDepth
-    })
+    event.stopPropagation()
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) {
+      setDraggingAttachment(false)
+    }
   }
 
-  const attachmentDropped: DragEventHandler<HTMLDivElement> = async event => {
+  const attachmentDropped: DragEventHandler<HTMLDivElement> = event => {
     if (!hasDraggedFiles(event.dataTransfer)) {
       return
     }
 
     event.preventDefault()
-    setDragDepth(0)
+    event.stopPropagation()
+    dragDepthRef.current = 0
     setDraggingAttachment(false)
-    const files =
-      event.dataTransfer.files.length > 0
-        ? Array.from(event.dataTransfer.files)
-        : Array.from(event.dataTransfer.items)
-            .filter(item => item.kind === 'file')
-            .map(item => item.getAsFile())
-            .filter((file): file is File => file !== null)
+    const files = collectDroppedFiles(event.dataTransfer)
 
     if (files.length === 0 || !attachmentDropHandler) {
       return
     }
 
-    await attachmentDropHandler(files)
+    attachmentDropHandler(files)
   }
 
   return (
@@ -201,7 +216,11 @@ const Compose: React.FC<Props> = props => {
             defaultLanguage={defaultLanguage}
             locale={props.locale}
             draggingAttachment={draggingAttachment}
-            setAttachmentDropHandler={setAttachmentDropHandler}
+            setAttachmentDropHandler={registerAttachmentDropHandler}
+            onAttachmentDragEnter={attachmentDragEnter}
+            onAttachmentDragOver={attachmentDragOver}
+            onAttachmentDragLeave={attachmentDragLeave}
+            onAttachmentDrop={attachmentDropped}
           />
         )}
       </Content>

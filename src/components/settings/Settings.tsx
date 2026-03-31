@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
-import { ChangeEvent, SyntheticEvent, useEffect, useRef, useState } from 'react'
+import { ChangeEvent, SyntheticEvent, useEffect, useState } from 'react'
 import { FormattedMessage, useIntl } from 'react-intl'
-import { Input, InputNumber, Modal, Panel, Form, Schema, ButtonToolbar, Button, InputPicker, Checkbox } from 'rsuite'
+import { Input, InputNumber, Modal, Panel, ButtonToolbar, Button, Checkbox } from 'rsuite'
+import FormSelectControl from 'src/components/ui/FormSelectControl'
 import { Settings as SettingsType, ThemeType } from 'src/entities/settings'
 import { localeType } from 'src/i18n'
 import { normalizeHexColor } from 'src/utils/highlightColor'
@@ -20,6 +21,12 @@ type FormValue = {
   color_theme: ThemeType
   highlight_color: string
   confirm_reblog: boolean
+}
+
+type FormError = {
+  font_size?: string
+  highlight_color?: string
+  language?: string
 }
 
 const languages = [
@@ -99,47 +106,76 @@ export default function Settings(props: Props) {
     highlight_color: '',
     confirm_reblog: false
   })
-  const [formError, setFormError] = useState<any>({})
+  const [formError, setFormError] = useState<FormError>({})
   const [fontList, setFontList] = useState<Array<{ label: string; value: string }>>([])
   const [settings, setSettings] = useState<SettingsType>()
-  const formRef = useRef<any>(null)
-
-  const model = Schema.Model<FormValue>({
-    font_size: Schema.Types.NumberType(formatMessage({ id: 'settings.settings.validation.font_size.type' }))
-      .range(1, 30, formatMessage({ id: 'settings.settings.validation.font_size.range' }, { from: 1, to: 30 }))
-      .isRequired(formatMessage({ id: 'settings.settings.validation.font_size.required' })),
-    font_family: Schema.Types.StringType(),
-    language: Schema.Types.StringType().isRequired(formatMessage({ id: 'settings.settings.validation.language.required' })),
-    color_theme: Schema.Types.StringType(),
-    highlight_color: Schema.Types.StringType().addRule(
-      value => value === undefined || value === null || value.trim().length === 0 || normalizeHexColor(value) !== null,
-      formatMessage({ id: 'settings.settings.validation.highlight_color.format' })
-    ),
-    confirm_reblog: Schema.Types.BooleanType()
-  })
 
   useEffect(() => {
-    const f = async () => {
+    if (!props.open) {
+      return
+    }
+
+    let active = true
+
+    void (async () => {
       const settings = await invoke<SettingsType>('read_settings')
+      const fonts = await invoke<Array<string>>('list_fonts')
+
+      if (!active) {
+        return
+      }
+
       setFormValue(current =>
         Object.assign({}, current, settings.appearance, settings.behavior, {
           highlight_color: settings.appearance.highlight_color ?? ''
         })
       )
+      setFormError({})
       setSettings(settings)
-      const f = await invoke<Array<string>>('list_fonts')
-      setFontList(f.map(f => ({ label: f, value: f })))
+      setFontList(fonts.map(font => ({ label: font, value: font })))
+    })().catch(error => {
+      console.error(error)
+    })
+
+    return () => {
+      active = false
     }
-    f()
   }, [props.open])
 
-  const handleSubmit = async () => {
-    if (formRef.current && !formRef.current.check()) {
+  const validateForm = (): FormError => {
+    const nextError: FormError = {}
+
+    if (!Number.isFinite(formValue.font_size)) {
+      nextError.font_size = formatMessage({ id: 'settings.settings.validation.font_size.type' })
+    } else if (formValue.font_size < 1 || formValue.font_size > 30) {
+      nextError.font_size = formatMessage({ id: 'settings.settings.validation.font_size.range' }, { from: 1, to: 30 })
+    }
+
+    if (!formValue.language) {
+      nextError.language = formatMessage({ id: 'settings.settings.validation.language.required' })
+    }
+
+    if (
+      formValue.highlight_color !== undefined &&
+      formValue.highlight_color !== null &&
+      formValue.highlight_color.trim().length > 0 &&
+      normalizeHexColor(formValue.highlight_color) === null
+    ) {
+      nextError.highlight_color = formatMessage({ id: 'settings.settings.validation.highlight_color.format' })
+    }
+
+    return nextError
+  }
+
+  const handleSubmit = () => {
+    const nextError = validateForm()
+    setFormError(nextError)
+    if (Object.keys(nextError).length > 0) {
       return
     }
 
     const highlightColor = normalizeHexColor(formValue.highlight_color)
-    const s: SettingsType = {
+    const nextSettings: SettingsType = {
       appearance: {
         font_size: Number(formValue.font_size),
         font_family: formValue.font_family,
@@ -152,9 +188,15 @@ export default function Settings(props: Props) {
       },
       app_menu: settings?.app_menu
     }
-    await invoke('save_settings', { obj: s })
-    props.reloadAppearance()
-    props.reloadBehavior()
+
+    void invoke('save_settings', { obj: nextSettings })
+      .then(() => {
+        props.reloadAppearance()
+        props.reloadBehavior()
+      })
+      .catch(error => {
+        console.error(error)
+      })
   }
 
   const colorTheme = themes.map(theme => ({
@@ -176,67 +218,115 @@ export default function Settings(props: Props) {
         </Modal.Title>
       </Modal.Header>
       <Modal.Body>
-        <Form layout="horizontal" formValue={formValue} formError={formError} onChange={setFormValue} onCheck={setFormError} model={model} ref={formRef}>
+        <div>
           <Panel header={<FormattedMessage id="settings.settings.appearance.title" />}>
-            <Form.Group controlId="language">
-              <Form.ControlLabel>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', marginBottom: '6px' }}>
                 <FormattedMessage id="settings.settings.appearance.language" />
-              </Form.ControlLabel>
-              <Form.Control name="language" accepter={InputPicker} cleanable={false} data={languages} />
-            </Form.Group>
-            <Form.Group controlId="font_size">
-              <Form.ControlLabel>
+              </label>
+              <FormSelectControl
+                name="language"
+                onChange={value => {
+                  if (!value) {
+                    return
+                  }
+
+                  setFormError(current => Object.assign({}, current, { language: undefined }))
+                  setFormValue(current => Object.assign({}, current, { language: value as localeType }))
+                }}
+                options={languages}
+                value={formValue.language}
+              />
+              {formError.language ? <FormHelpError>{formError.language}</FormHelpError> : null}
+            </div>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', marginBottom: '6px' }}>
                 <FormattedMessage id="settings.settings.appearance.font_size" />
-              </Form.ControlLabel>
-              <Form.Control name="font_size" accepter={InputNumber} postfix="px" />
-            </Form.Group>
-            <Form.Group controlId="font_family">
-              <Form.ControlLabel>
+              </label>
+              <InputNumber
+                postfix="px"
+                value={formValue.font_size}
+                onChange={value => {
+                  setFormError(current => Object.assign({}, current, { font_size: undefined }))
+                  setFormValue(current => Object.assign({}, current, { font_size: Number(value) }))
+                }}
+              />
+              {formError.font_size ? <FormHelpError>{formError.font_size}</FormHelpError> : null}
+            </div>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', marginBottom: '6px' }}>
                 <FormattedMessage id="settings.settings.appearance.font_family" />
-              </Form.ControlLabel>
-              <Form.Control name="font_family" accepter={InputPicker} cleanable={true} data={fontList} />
-            </Form.Group>
-            <Form.Group controlId="color_theme">
-              <Form.ControlLabel>
+              </label>
+              <FormSelectControl
+                emptyLabel={formatMessage({ id: 'settings.settings.appearance.font_family' })}
+                name="font_family"
+                onChange={value => {
+                  setFormValue(current => Object.assign({}, current, { font_family: value }))
+                }}
+                options={fontList}
+                value={formValue.font_family}
+              />
+            </div>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', marginBottom: '6px' }}>
                 <FormattedMessage id="settings.settings.appearance.color_theme" />
-              </Form.ControlLabel>
-              <Form.Control name="color_theme" accepter={InputPicker} cleanable={false} data={colorTheme} />
-            </Form.Group>
-            <Form.Group controlId="highlight_color">
-              <Form.ControlLabel>
+              </label>
+              <FormSelectControl
+                name="color_theme"
+                onChange={value => {
+                  if (!value) {
+                    return
+                  }
+
+                  setFormValue(current => Object.assign({}, current, { color_theme: value as ThemeType }))
+                }}
+                options={colorTheme}
+                value={formValue.color_theme}
+              />
+            </div>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', marginBottom: '6px' }}>
                 <FormattedMessage id="settings.settings.appearance.highlight_color" />
-              </Form.ControlLabel>
-              <Form.Control name="highlight_color" accepter={Input} placeholder="#3498FF" />
-              <Form.HelpText>
+              </label>
+              <Input
+                placeholder="#3498FF"
+                value={formValue.highlight_color}
+                onChange={value => {
+                  setFormError(current => Object.assign({}, current, { highlight_color: undefined }))
+                  setFormValue(current => Object.assign({}, current, { highlight_color: value }))
+                }}
+              />
+              <div>
                 <FormattedMessage id="settings.settings.appearance.highlight_color_help" />
-              </Form.HelpText>
-            </Form.Group>
+              </div>
+              {formError.highlight_color ? <FormHelpError>{formError.highlight_color}</FormHelpError> : null}
+            </div>
           </Panel>
           <Panel header={<FormattedMessage id="settings.settings.behavior.title" />}>
-            <Form.Group controlId="confirm_reblog">
-              <Form.ControlLabel>
+            <div>
+              <label style={{ display: 'block', marginBottom: '6px' }}>
                 <FormattedMessage id="settings.settings.behavior.confirm_reblog" />
-              </Form.ControlLabel>
-              <Form.Control
-                name="confirm_reblog"
-                accepter={Checkbox}
-                defaultChecked={formValue.confirm_reblog}
+              </label>
+              <Checkbox
+                checked={formValue.confirm_reblog}
                 onChange={updateConfirmBoost}
               />
-            </Form.Group>
+            </div>
           </Panel>
-          <Form.Group>
+          <div>
             <ButtonToolbar style={{ justifyContent: 'flex-end' }}>
-              <Button appearance="primary" type="submit" onClick={handleSubmit}>
+              <Button appearance="primary" type="button" onClick={handleSubmit}>
                 <FormattedMessage id="settings.settings.save" />
               </Button>
               <Button onClick={props.onClose}>
                 <FormattedMessage id="settings.settings.close" />
               </Button>
             </ButtonToolbar>
-          </Form.Group>
-        </Form>
+          </div>
+        </div>
       </Modal.Body>
     </Modal>
   )
 }
+
+const FormHelpError = ({ children }) => <div style={{ color: 'red', marginTop: '6px' }}>{children}</div>

@@ -68,6 +68,7 @@ pub fn set_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
             .cut_with_text(t!("app_menu.cut"))
             .copy_with_text(t!("app_menu.copy"))
             .paste_with_text(t!("app_menu.paste"))
+            .select_all_with_text(t!("app_menu.select_all"))
             .build()?;
         let _ = menu.append(&submenu)?;
     }

@@ -10,11 +10,11 @@ import FailoverImg from 'src/utils/failoverImg'
 import { Unread } from 'src/entities/unread'
 import { Marker } from 'src/entities/marker'
 import { Instruction } from 'src/entities/instruction'
-import { listen } from '@tauri-apps/api/event'
 import alert from 'src/components/utils/alert'
 import generator, { Entity } from 'megalodon'
 import { useRouter } from 'next/router'
 import { FormattedMessage, useIntl } from 'react-intl'
+import { useTauriListen } from 'src/hooks/useTauriListen'
 
 type NavigatorProps = {
   servers: Array<ServerSet>
@@ -38,40 +38,49 @@ const Navigator: React.FC<NavigatorProps> = (props): ReactElement => {
   const [walkthrough, setWalkthrough] = useState(false)
   const toaster = useToaster()
 
+  useTauriListen<Instruction>('updated-instruction', event => {
+    setWalkthrough(event.payload.instruction == 2)
+  })
+
   useEffect(() => {
-    const f = async () => {
-      try {
-        const instruction = await invoke<Instruction>('get_instruction')
-        if (instruction.instruction == 2) {
-          setWalkthrough(true)
-        } else {
-          setWalkthrough(false)
+    let active = true
+
+    void invoke<Instruction>('get_instruction')
+      .then(instruction => {
+        if (!active) {
+          return
         }
-      } catch (err) {
+
+        setWalkthrough(instruction.instruction == 2)
+      })
+      .catch(err => {
         console.log(err)
-      }
+      })
+
+    return () => {
+      active = false
     }
-    f()
-    listen<Instruction>('updated-instruction', event => {
-      if (event.payload.instruction == 2) {
-        setWalkthrough(true)
-      } else {
-        setWalkthrough(false)
-      }
-    })
   }, [])
 
   useEffect(() => {
-    props.servers.map(async set => {
-      if (!set.account) return set
-      const client = generator(set.server.sns, set.server.base_url, set.account.access_token, 'Fedistar')
-      try {
-        const notifications = (await client.getNotifications()).data
-        const res = await client.getMarkers(['notifications'])
-        const marker = res.data as Entity.Marker
-        if (marker.notifications) {
-          const count = unreadCount(marker.notifications, notifications)
+    let active = true
 
+    void Promise.all(
+      props.servers.map(async set => {
+        if (!set.account) {
+          return
+        }
+
+        const client = generator(set.server.sns, set.server.base_url, set.account.access_token, 'Fedistar')
+        try {
+          const notifications = (await client.getNotifications()).data
+          const res = await client.getMarkers(['notifications'])
+          const marker = res.data as Entity.Marker
+          if (!active || !marker.notifications) {
+            return
+          }
+
+          const count = unreadCount(marker.notifications, notifications)
           const target = props.unreads.find(u => u.server_id === set.server.id)
           if (target) {
             props.setUnreads(unreads =>
@@ -85,43 +94,52 @@ const Navigator: React.FC<NavigatorProps> = (props): ReactElement => {
           } else {
             props.setUnreads(unreads => unreads.concat({ server_id: set.server.id, count: count }))
           }
+        } catch (err) {
+          console.error(err)
         }
-      } catch (err) {
-        console.error(err)
-      }
-      return set
-    })
+      })
+    )
+
+    return () => {
+      active = false
+    }
   }, [props.servers])
 
-  const closeWalkthrough = async () => {
+  const closeWalkthrough = () => {
     setWalkthrough(false)
-    await invoke('update_instruction', { step: 3 })
+    void invoke('update_instruction', { step: 3 })
   }
 
-  const openNotification = async (set: ServerSet) => {
-    if (!props.unreads.find(u => u.server_id === set.server.id && u.count > 0)) return
-    const timelines = await invoke<Array<[Timeline, Server]>>('list_timelines')
-    let target = timelines.find(t => t[1].id === set.server.id && t[0].kind === 'notifications')
-    if (target === undefined || target === null) {
-      await invoke('add_timeline', { server: set.server, kind: 'notifications', name: 'Notifications', columnWidth: 'sm' })
-      const timelines = await invoke<Array<[Timeline, Server]>>('list_timelines')
-      target = timelines.find(t => t[1].id === set.server.id && t[0].kind === 'notifications')
-      if (target === undefined || target === null) {
-        toaster.push(alert('error', formatMessage({ id: 'alert.notifications_not_found' })), { placement: 'topStart' })
-      }
+  const openNotification = (set: ServerSet) => {
+    if (!props.unreads.find(u => u.server_id === set.server.id && u.count > 0)) {
+      return
     }
 
-    props.setHighlighted(current => {
-      if (current && current.id === target[0].id) {
-        return current
+    void (async () => {
+      const timelines = await invoke<Array<[Timeline, Server]>>('list_timelines')
+      let target = timelines.find(t => t[1].id === set.server.id && t[0].kind === 'notifications')
+      if (target === undefined || target === null) {
+        await invoke('add_timeline', { server: set.server, kind: 'notifications', name: 'Notifications', columnWidth: 'sm' })
+        const nextTimelines = await invoke<Array<[Timeline, Server]>>('list_timelines')
+        target = nextTimelines.find(t => t[1].id === set.server.id && t[0].kind === 'notifications')
+        if (target === undefined || target === null) {
+          toaster.push(alert('error', formatMessage({ id: 'alert.notifications_not_found' })), { placement: 'topStart' })
+          return
+        }
       }
-      setTimeout(() => {
-        props.setHighlighted(null)
-      }, 5000)
-      return target[0]
-    })
 
-    return
+      props.setHighlighted(current => {
+        if (current && current.id === target[0].id) {
+          return current
+        }
+        setTimeout(() => {
+          props.setHighlighted(null)
+        }, 5000)
+        return target[0]
+      })
+    })().catch(error => {
+      console.error(error)
+    })
   }
 
   const menuStyle = (opened: boolean) => {
@@ -326,11 +344,11 @@ const settingsMenu = (
   { className, left, top, onClose, openThirdparty, openSettings }: SettingsMenuProps,
   ref: React.RefCallback<HTMLElement>
 ): ReactElement => {
-  const handleSelect = async (eventKey: string) => {
+  const handleSelect = (eventKey: string) => {
     onClose()
     switch (eventKey) {
       case 'menu': {
-        await invoke('toggle_menu')
+        void invoke('toggle_menu')
         break
       }
       case 'settings': {

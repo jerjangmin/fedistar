@@ -1,6 +1,5 @@
 import { useState, useEffect, useReducer, CSSProperties, useRef, useCallback, useContext } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
 import { Container, Content, useToaster, DOMHelper } from 'rsuite'
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
 import dayjs from 'dayjs'
@@ -32,6 +31,7 @@ import { useIntl } from 'react-intl'
 import { Context } from 'src/i18n'
 import Search from 'src/components/search/Search'
 import { Behavior } from 'src/entities/behavior'
+import { useTauriListen } from 'src/hooks/useTauriListen'
 
 const { scrollLeft } = DOMHelper
 
@@ -72,6 +72,62 @@ function App() {
     setTimelines(timelines)
   }
 
+  const refreshServers = () => {
+    void invoke<Array<[Server, Account | null]>>('list_servers')
+      .then(res => {
+        setServers(
+          res.map(r => ({
+            server: r[0],
+            account: r[1]
+          }))
+        )
+      })
+      .catch(error => {
+        console.error(error)
+      })
+  }
+
+  useTauriListen('updated-timelines', () => {
+    void loadTimelines()
+  })
+
+  useTauriListen('updated-servers', () => {
+    refreshServers()
+  })
+
+  useTauriListen<ReceiveNotificationPayload>('receive-notification', ev => {
+    const server_id = ev.payload.server_id
+    setUnreads(current => {
+      const target = current.find(u => u.server_id === server_id)
+      if (target) {
+        return current.map(u => {
+          if (u.server_id === server_id) {
+            return Object.assign({}, u, { count: u.count + 1 })
+          }
+          return u
+        })
+      }
+
+      return current.concat({ server_id: server_id, count: 1 })
+    })
+
+    void (async () => {
+      let permissionGranted = await isPermissionGranted()
+      if (!permissionGranted) {
+        const permission = await requestPermission()
+        permissionGranted = permission === 'granted'
+      }
+      if (permissionGranted) {
+        const [title, body] = generateNotification(ev.payload.notification, formatMessage)
+        if (title.length > 0) {
+          sendNotification({ title, body })
+        }
+      }
+    })().catch(error => {
+      console.error(error)
+    })
+  })
+
   useEffect(() => {
     loadAppearance()
     loadBehavior()
@@ -95,48 +151,6 @@ function App() {
 
     loadTimelines()
 
-    listen('updated-timelines', () => {
-      loadTimelines()
-    })
-    listen('updated-servers', async () => {
-      const res = await invoke<Array<[Server, Account | null]>>('list_servers')
-      setServers(
-        res.map(r => ({
-          server: r[0],
-          account: r[1]
-        }))
-      )
-    })
-
-    listen<ReceiveNotificationPayload>('receive-notification', async ev => {
-      const server_id = ev.payload.server_id
-      setUnreads(current => {
-        const target = current.find(u => u.server_id === server_id)
-        if (target) {
-          return current.map(u => {
-            if (u.server_id === server_id) {
-              return Object.assign({}, u, { count: u.count + 1 })
-            }
-            return u
-          })
-        } else {
-          return current.concat({ server_id: server_id, count: 1 })
-        }
-      })
-
-      let permissionGranted = await isPermissionGranted()
-      if (!permissionGranted) {
-        const permission = await requestPermission()
-        permissionGranted = permission === 'granted'
-      }
-      if (permissionGranted) {
-        const [title, body] = generateNotification(ev.payload.notification, formatMessage)
-        if (title.length > 0) {
-          sendNotification({ title, body })
-        }
-      }
-    })
-
     return () => {
       document.removeEventListener('keydown', handleKeyPress)
     }
@@ -159,9 +173,9 @@ function App() {
     }
   }, [highlighted])
 
-  const handleKeyPress = useCallback(async (event: KeyboardEvent) => {
+  const handleKeyPress = useCallback((event: KeyboardEvent) => {
     if (event.key === 'F12') {
-      await invoke('switch_devtools')
+      void invoke('switch_devtools')
     }
   }, [])
 

@@ -17,5 +17,6 @@ app_menu:
   cut: 剪切
   copy: 复制
   paste: 粘贴
+  select_all: 全选
 media:
   title: 媒体

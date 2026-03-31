@@ -17,5 +17,6 @@ app_menu:
   cut: 切り取り
   copy: コピー
   paste: 貼り付け
+  select_all: すべてを選択
 media:
   title: メディア

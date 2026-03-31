@@ -55,7 +55,8 @@
         "width": 800,
         "minWidth": 348,
         "minHeight": 320,
-        "useHttpsScheme": true
+        "useHttpsScheme": true,
+        "dragDropEnabled": false
       }
     ],
     "security": {

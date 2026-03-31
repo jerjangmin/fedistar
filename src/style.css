@@ -16,6 +16,26 @@
   -webkit-text-size-adjust: 100%;
 }
 
+html {
+  height: 100%;
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
+html.media-modal-open {
+  overflow: hidden !important;
+  scrollbar-gutter: auto !important;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+html.media-modal-open::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
+}
+
 body {
   font-family:
     Apple-System,
@@ -29,6 +49,26 @@ body {
     STXihei,
     sans-serif;
   height: 100%;
+  overflow: hidden;
+}
+
+body.rs-modal-open {
+  overflow: hidden !important;
+  padding-right: 0 !important;
+}
+
+body.media-modal-open {
+  overflow: hidden !important;
+  scrollbar-gutter: auto !important;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+body.media-modal-open::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
 }
 
 .login-page {
@@ -37,8 +77,10 @@ body {
 
 #__next {
   height: 100%;
+  overflow: hidden;
 }
 
 .index {
   height: 100%;
+  overflow: hidden;
 }

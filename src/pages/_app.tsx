@@ -4,8 +4,11 @@ import '../style.css'
 import '../App.scss'
 
 import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import { LogicalPosition } from '@tauri-apps/api/dpi'
+import { Menu } from '@tauri-apps/api/menu/menu'
 import { useEffect, useState } from 'react'
+import AppErrorBoundary from 'src/components/AppErrorBoundary'
+import { useTauriListen } from 'src/hooks/useTauriListen'
 import { IntlProviderWrapper } from 'src/i18n'
 import { RsuiteProviderWrapper } from 'src/theme'
 import { refreshEmojiCatalogEntries } from 'src/utils/emojiCatalog'
@@ -14,47 +17,108 @@ import { refreshEmojiCatalogEntries } from 'src/utils/emojiCatalog'
 export default function MyApp({ Component, pageProps }: AppProps) {
   const [emojiCatalogVersion, setEmojiCatalogVersion] = useState(0)
 
-  useEffect(() => {
-    let disposed = false
-    let unlistenUpdatedServers: (() => void) | null = null
-
-    const loadEmojiCatalogs = async () => {
-      try {
-        await refreshEmojiCatalogEntries()
-        if (!disposed) {
-          setEmojiCatalogVersion(current => current + 1)
-        }
-      } catch (err) {
+  const loadEmojiCatalogs = () => {
+    void refreshEmojiCatalogEntries()
+      .then(() => {
+        setEmojiCatalogVersion(current => current + 1)
+      })
+      .catch(err => {
         console.error(err)
+      })
+  }
+
+  useTauriListen('updated-servers', () => {
+    loadEmojiCatalogs()
+  })
+
+  useEffect(() => {
+    const normalizeUnhandledReason = (reason: unknown) => {
+      if (reason instanceof Error) {
+        return reason.stack ?? reason.message
+      }
+
+      if (reason === null) {
+        return 'Unhandled promise rejection: null'
+      }
+
+      if (reason === undefined) {
+        return 'Unhandled promise rejection: undefined'
+      }
+
+      if (typeof reason === 'string') {
+        return reason
+      }
+
+      try {
+        return JSON.stringify(reason)
+      } catch {
+        return String(reason)
       }
     }
 
-    window.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
-      invoke('frontend_log', { level: 'error', message: event.reason.toString() })
-    })
-    window.addEventListener('error', (event: ErrorEvent) => {
-      invoke('frontend_log', { level: 'error', message: event.message.toString() })
-    })
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      void invoke('frontend_log', { level: 'error', message: normalizeUnhandledReason(event.reason) })
+    }
+
+    const handleWindowError = (event: ErrorEvent) => {
+      void invoke('frontend_log', { level: 'error', message: event.message.toString() })
+    }
+
+    const openAppContextMenu = async (event: MouseEvent) => {
+      if (event.defaultPrevented) {
+        return
+      }
+
+      event.preventDefault()
+
+      const menu = await Menu.new({
+        items: [
+          {
+            id: 'reload',
+            text: 'Reload',
+            action: () => {
+              window.location.reload()
+            }
+          },
+          {
+            id: 'open-devtools',
+            text: 'Open DevTools',
+            action: () => {
+              void invoke('switch_devtools').catch(err => {
+                console.error(err)
+              })
+            }
+          }
+        ]
+      })
+
+      try {
+        await menu.popup(new LogicalPosition(event.clientX, event.clientY))
+      } finally {
+        await menu.close()
+      }
+    }
+
+    document.addEventListener('contextmenu', openAppContextMenu)
+    window.addEventListener('unhandledrejection', handleUnhandledRejection)
+    window.addEventListener('error', handleWindowError)
+
     loadEmojiCatalogs()
-    listen('updated-servers', () => {
-      loadEmojiCatalogs()
-    }).then(fn => {
-      unlistenUpdatedServers = fn
-    })
 
     return () => {
-      disposed = true
-      if (unlistenUpdatedServers) {
-        unlistenUpdatedServers()
-      }
+      document.removeEventListener('contextmenu', openAppContextMenu)
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection)
+      window.removeEventListener('error', handleWindowError)
     }
   }, [])
 
   return (
-    <RsuiteProviderWrapper>
-      <IntlProviderWrapper>
-        <Component key={emojiCatalogVersion} {...pageProps} />
-      </IntlProviderWrapper>
-    </RsuiteProviderWrapper>
+    <AppErrorBoundary>
+      <RsuiteProviderWrapper>
+        <IntlProviderWrapper>
+          <Component key={emojiCatalogVersion} {...pageProps} />
+        </IntlProviderWrapper>
+      </RsuiteProviderWrapper>
+    </AppErrorBoundary>
   )
 }

@@ -1,8 +1,6 @@
 import {
-  Form,
   Button,
   ButtonToolbar,
-  Schema,
   Whisper,
   Input,
   Popover,
@@ -12,12 +10,20 @@ import {
   Toggle,
   Checkbox,
   FlexboxGrid,
-  Radio,
-  InputPicker,
-  FormControlProps,
-  DatePicker
+  Radio
 } from 'rsuite'
-import { useState, useEffect, useRef, forwardRef, ChangeEvent, useCallback, useContext, ClipboardEventHandler, DragEventHandler } from 'react'
+import {
+  useState,
+  useEffect,
+  useRef,
+  forwardRef,
+  ChangeEvent,
+  useCallback,
+  useContext,
+  ClipboardEventHandler,
+  DragEventHandler,
+  DragEvent
+} from 'react'
 import { Icon } from '@rsuite/icons'
 import {
   BsEmojiLaughing,
@@ -37,6 +43,7 @@ import { Entity, MegalodonInterface } from 'megalodon'
 import Picker from '@emoji-mart/react'
 import { invoke } from '@tauri-apps/api/core'
 import { readImage } from '@tauri-apps/plugin-clipboard-manager'
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 
 import { data, mapCustomEmojiCategory } from 'src/utils/emojiData'
 import { Server } from 'src/entities/server'
@@ -48,6 +55,8 @@ import languages from 'src/utils/languages'
 import EditMedia from './EditMedia'
 import { FormattedMessage, useIntl } from 'react-intl'
 import { Context } from 'src/theme'
+import { attachmentPreviewUrl } from 'src/utils/mediaAttachment'
+import FormSelectControl from 'src/components/ui/FormSelectControl'
 
 type Props = {
   server: Server
@@ -62,7 +71,11 @@ type Props = {
   onClose?: () => void
   locale: string
   draggingAttachment?: boolean
-  setAttachmentDropHandler?: (handler: ((files: Array<File>) => Promise<void>) | null) => void
+  setAttachmentDropHandler?: (handler: ((files: Array<File>) => void) | null) => void
+  onAttachmentDragEnter?: DragEventHandler<HTMLDivElement>
+  onAttachmentDragOver?: DragEventHandler<HTMLDivElement>
+  onAttachmentDragLeave?: DragEventHandler<HTMLDivElement>
+  onAttachmentDrop?: DragEventHandler<HTMLDivElement>
 }
 
 type FormValue = {
@@ -80,25 +93,78 @@ type Poll = {
   multiple: boolean
 }
 
-const model = Schema.Model({
-  status: Schema.Types.StringType().isRequired('This field is required.'),
-  attachments: Schema.Types.ArrayType().maxLength(4, "Can't attach over 5 files"),
-  poll: Schema.Types.ObjectType().shape({
-    options: Schema.Types.ArrayType().of(Schema.Types.StringType().isRequired('Required')).minLength(2, 'Minimum 2 choices required'),
-    expires_in: Schema.Types.NumberType().isInteger('Must be a number').min(0, 'Must be greater than 0'),
-    multiple: Schema.Types.BooleanType()
-  }),
-  scheduled_at: Schema.Types.DateType().addRule((value, _data) => {
-    const limit = new Date()
-    limit.setMinutes(limit.getMinutes() + 5)
-    if (value <= limit) {
-      return false
-    }
-    return true
-  }, 'Must be at least 5 minutes in the future')
-})
+type PollError = {
+  expires_in?: string
+  general?: string
+  options?: Array<string | null>
+}
+
+type FormError = {
+  poll?: PollError
+  scheduled_at?: string
+  status?: string
+}
 
 const MAX_ATTACHMENTS = 5
+const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'bmp',
+  'avif',
+  'heic',
+  'heif',
+  'mp4',
+  'mov',
+  'm4v',
+  'webm',
+  'mkv'
+])
+
+const isUsableUploadFile = (value: unknown): value is File => {
+  if (!(value instanceof File)) {
+    return false
+  }
+
+  return typeof value.name === 'string' && typeof value.type === 'string' && typeof value.arrayBuffer === 'function'
+}
+
+const describeUploadCandidate = (value: unknown) => {
+  if (value === null) {
+    return 'null'
+  }
+
+  if (value === undefined) {
+    return 'undefined'
+  }
+
+  if (value instanceof File) {
+    return `File(name="${value.name}", type="${value.type}", size=${value.size})`
+  }
+
+  if (typeof value === 'object') {
+    return Object.prototype.toString.call(value)
+  }
+
+  return typeof value
+}
+
+const firefishAttachmentFromResponse = (file: any): Entity.Attachment => ({
+  id: file.id,
+  type: file.type === 'image/gif' ? 'gifv' : file.type?.startsWith('video') ? 'video' : file.type?.startsWith('image') ? 'image' : 'unknown',
+  url: file.url ? file.url : '',
+  remote_url: file.url,
+  preview_url: file.thumbnailUrl,
+  text_url: file.url,
+  meta: {
+    width: file.properties?.width,
+    height: file.properties?.height
+  },
+  description: file.comment,
+  blurhash: file.blurhash
+})
 
 const Status: React.FC<Props> = props => {
   const { formatMessage } = useIntl()
@@ -118,14 +184,11 @@ const Status: React.FC<Props> = props => {
   const [editMedia, setEditMedia] = useState<Entity.Attachment | null>(null)
   const [maxCharacters, setMaxCharacters] = useState<number | null>(null)
   const [remaining, setRemaining] = useState<number | null>(null)
-  const [draggingAttachment, setDraggingAttachment] = useState(false)
 
-  const formRef = useRef<any>(null)
-  const cwRef = useRef<HTMLDivElement>(null)
-  const statusRef = useRef<HTMLDivElement>(null)
+  const cwRef = useRef<HTMLInputElement>(null)
+  const statusRef = useRef<HTMLTextAreaElement>(null)
   const emojiPickerRef = useRef(null)
   const uploaderRef = useRef<HTMLInputElement>(null)
-  const dragDepthRef = useRef(0)
   const toast = useToaster()
 
   // Update instance custom emoji
@@ -234,86 +297,89 @@ const Status: React.FC<Props> = props => {
     }
   }, [maxCharacters, formValue])
 
-  const handleSubmit = async () => {
+  const submitStatus = async () => {
     if (loading) {
       return
     }
-    if (formRef === undefined || formRef.current === undefined) {
-      return
-    } else if (!formRef.current.check()) {
+
+    const validationError = validateFormValue(formValue)
+    setFormError(validationError)
+    if (hasFormError(validationError)) {
       toast.push(alert('error', formatMessage({ id: 'alert.validation_error' })), { placement: 'topStart' })
       return
-    } else {
-      setLoading(true)
-      try {
-        let options = { visibility: visibility }
-        if (props.in_reply_to) {
-          options = Object.assign({}, options, {
-            in_reply_to_id: props.in_reply_to.id
-          })
-        }
-        if (props.quote_target) {
-          options = Object.assign({}, options, {
-            quote_id: props.quote_target.id
-          })
-        }
-        if (formValue.attachments) {
-          options = Object.assign({}, options, {
-            media_ids: formValue.attachments.map(m => m.id)
-          })
-        }
-        if (formValue.nsfw !== undefined) {
-          options = Object.assign({}, options, {
-            sensitive: formValue.nsfw
-          })
-        }
-        if (language) {
-          options = Object.assign({}, options, {
-            language: language
-          })
-        }
-        if (formValue.spoiler.length > 0) {
-          options = Object.assign({}, options, {
-            spoiler_text: formValue.spoiler
-          })
-        }
-        if (formValue.poll !== undefined && formValue.poll.options.length > 0) {
-          options = Object.assign({}, options, {
-            poll: formValue.poll
-          })
-        }
-        if (formValue.scheduled_at !== undefined) {
-          options = Object.assign({}, options, {
-            scheduled_at: formValue.scheduled_at.toISOString()
-          })
-        }
-        if (props.edit_target) {
-          await props.client.editStatus(
-            props.edit_target.id,
-            Object.assign({}, options, {
-              status: formValue.status
-            })
-          )
-        } else {
-          await props.client.postStatus(formValue.status, options)
-        }
-        clear()
-      } catch (err) {
-        console.error(err)
-        toast.push(alert('error', formatMessage({ id: 'alert.failed_post' })), { placement: 'topStart' })
-      } finally {
-        setLoading(false)
-      }
     }
+
+    setLoading(true)
+    try {
+      let options = { visibility: visibility }
+      if (props.in_reply_to) {
+        options = Object.assign({}, options, {
+          in_reply_to_id: props.in_reply_to.id
+        })
+      }
+      if (props.quote_target) {
+        options = Object.assign({}, options, {
+          quote_id: props.quote_target.id
+        })
+      }
+      if (formValue.attachments) {
+        options = Object.assign({}, options, {
+          media_ids: formValue.attachments.map(m => m.id)
+        })
+      }
+      if (formValue.nsfw !== undefined) {
+        options = Object.assign({}, options, {
+          sensitive: formValue.nsfw
+        })
+      }
+      if (language) {
+        options = Object.assign({}, options, {
+          language: language
+        })
+      }
+      if (formValue.spoiler.length > 0) {
+        options = Object.assign({}, options, {
+          spoiler_text: formValue.spoiler
+        })
+      }
+      if (formValue.poll !== undefined && formValue.poll.options.length > 0) {
+        options = Object.assign({}, options, {
+          poll: formValue.poll
+        })
+      }
+      if (formValue.scheduled_at !== undefined) {
+        options = Object.assign({}, options, {
+          scheduled_at: formValue.scheduled_at.toISOString()
+        })
+      }
+      if (props.edit_target) {
+        await props.client.editStatus(
+          props.edit_target.id,
+          Object.assign({}, options, {
+            status: formValue.status
+          })
+        )
+      } else {
+        await props.client.postStatus(formValue.status, options)
+      }
+      clear()
+    } catch (err) {
+      console.error(err)
+      toast.push(alert('error', formatMessage({ id: 'alert.failed_post' })), { placement: 'topStart' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSubmit = () => {
+    void submitStatus()
   }
 
   const handleKeyPress = useCallback(
     (event: KeyboardEvent) => {
-      if (event.ctrlKey === true && event.key === 'Enter') {
-        if (
-          document.activeElement === statusRef.current?.firstElementChild ||
-          document.activeElement === cwRef.current?.firstElementChild
-        ) {
+      if ((event.ctrlKey === true || event.metaKey === true) && event.key === 'Enter') {
+        if (document.activeElement === statusRef.current || document.activeElement === cwRef.current) {
+          event.preventDefault()
           handleSubmit()
         }
       }
@@ -334,6 +400,7 @@ const Status: React.FC<Props> = props => {
       spoiler: '',
       status: ''
     })
+    setFormError({})
     setCW(false)
     if (props.onClose) {
       props.onClose()
@@ -341,7 +408,10 @@ const Status: React.FC<Props> = props => {
   }
 
   const onEmojiSelect = emoji => {
-    const textarea = statusRef.current.firstElementChild as HTMLTextAreaElement
+    const textarea = statusRef.current
+    if (!textarea) {
+      return
+    }
     const cursor = textarea.selectionStart
     if (emoji.native) {
       setFormValue(current =>
@@ -366,64 +436,154 @@ const Status: React.FC<Props> = props => {
     }
   }
 
+  const isSupportedAttachment = (file: File) => {
+    if (file.type.includes('image') || file.type.includes('video')) {
+      return true
+    }
+
+    const extension = file.name.split('.').pop()?.toLowerCase()
+    if (!extension) {
+      return false
+    }
+
+    return SUPPORTED_ATTACHMENT_EXTENSIONS.has(extension)
+  }
+
+  const uploadAttachmentDirect = useCallback(async (file: File): Promise<Entity.Attachment | Entity.AsyncAttachment> => {
+    const endpoint =
+      props.server.sns === 'firefish'
+        ? new URL('/api/drive/files/create', props.server.base_url).toString()
+        : new URL('/api/v2/media', props.server.base_url).toString()
+
+    const formData = new FormData()
+    formData.append('file', file, file.name || 'attachment')
+
+    const headers: Record<string, string> = {}
+
+    if (props.server.sns === 'firefish') {
+      formData.append('i', props.account.access_token)
+    } else {
+      headers.Authorization = `Bearer ${props.account.access_token}`
+    }
+
+    const response = await tauriFetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: formData
+    })
+
+    if (!response.ok) {
+      let detail = `${response.status} ${response.statusText}`.trim()
+
+      try {
+        const payload = await response.json()
+        if (typeof payload?.error === 'string') {
+          detail = payload.error
+        } else if (typeof payload?.message === 'string') {
+          detail = payload.message
+        }
+      } catch {
+        try {
+          const text = await response.text()
+          if (text.trim().length > 0) {
+            detail = text.trim()
+          }
+        } catch {
+          // Ignore response body parsing failures and keep the status line.
+        }
+      }
+
+      throw new Error(detail)
+    }
+
+    const data = await response.json()
+    return props.server.sns === 'firefish' ? firefishAttachmentFromResponse(data) : data
+  }, [props.account.access_token, props.server.base_url, props.server.sns])
+
   const appendAttachments = useCallback(async (files: Array<File>) => {
-    let attachableCount = formValue.attachments?.length ?? 0
-    const uploadTargets: Array<File> = []
-
-    for (const file of files) {
-      if (attachableCount >= MAX_ATTACHMENTS) {
-        toast.push(alert('error', formatMessage({ id: 'alert.validation_attachments_length' }, { limit: MAX_ATTACHMENTS })), {
-          placement: 'topStart'
-        })
-        break
-      }
-
-      if (!file.type.includes('image') && !file.type.includes('video')) {
-        toast.push(alert('error', formatMessage({ id: 'alert.validation_attachments_type' })), { placement: 'topStart' })
-        continue
-      }
-
-      uploadTargets.push(file)
-      attachableCount += 1
-    }
-
-    if (uploadTargets.length === 0) {
-      return
-    }
-
     try {
+      let attachableCount = formValue.attachments?.length ?? 0
+      const uploadTargets: Array<File> = []
+
+      for (const candidate of files) {
+        if (!isUsableUploadFile(candidate)) {
+          console.error('Rejected dropped attachment candidate', {
+            candidate: describeUploadCandidate(candidate)
+          })
+          toast.push(alert('error', `${formatMessage({ id: 'alert.upload_error' })}: failed to read the dropped file.`), {
+            placement: 'topStart'
+          })
+          continue
+        }
+
+        if (attachableCount >= MAX_ATTACHMENTS) {
+          toast.push(alert('error', formatMessage({ id: 'alert.validation_attachments_length' }, { limit: MAX_ATTACHMENTS })), {
+            placement: 'topStart'
+          })
+          break
+        }
+
+        if (!isSupportedAttachment(candidate)) {
+          toast.push(alert('error', formatMessage({ id: 'alert.validation_attachments_type' })), { placement: 'topStart' })
+          continue
+        }
+
+        uploadTargets.push(candidate)
+        attachableCount += 1
+      }
+
+      if (uploadTargets.length === 0) {
+        return
+      }
+
       setLoading(true)
       for (const file of uploadTargets) {
-      const res = await props.client.uploadMedia(file)
+        let attachment: Entity.Attachment | Entity.AsyncAttachment
+
+        try {
+          const res = await props.client.uploadMedia(file)
+          attachment = res.data
+        } catch (error) {
+          console.error('uploadMedia failed, falling back to native upload', {
+            error,
+            file: describeUploadCandidate(file)
+          })
+          attachment = await uploadAttachmentDirect(file)
+        }
+
         setFormValue(current => {
           if (current.attachments) {
-            return Object.assign({}, current, { attachments: [...current.attachments, res.data] })
+            return Object.assign({}, current, { attachments: [...current.attachments, attachment] })
           }
-          return Object.assign({}, current, { attachments: [res.data] })
+          return Object.assign({}, current, { attachments: [attachment] })
         })
       }
-    } catch {
-      toast.push(alert('error', formatMessage({ id: 'alert.upload_error' })), { placement: 'topStart' })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      console.error('Attachment upload failed', error)
+      toast.push(alert('error', `${formatMessage({ id: 'alert.upload_error' })}: ${detail}`), { placement: 'topStart' })
     } finally {
       setLoading(false)
     }
-  }, [formValue.attachments, formatMessage, props.client, toast])
+  }, [formValue.attachments, formatMessage, props.client, toast, uploadAttachmentDirect])
 
   useEffect(() => {
-    props.setAttachmentDropHandler?.(appendAttachments)
+    props.setAttachmentDropHandler?.(files => {
+      void appendAttachments(files)
+    })
 
     return () => {
       props.setAttachmentDropHandler?.(null)
     }
   }, [appendAttachments, props.setAttachmentDropHandler])
 
-  const fileChanged = async (_filepath: string, event: ChangeEvent<HTMLInputElement>) => {
+  const fileChanged = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? [])
     if (files.length === 0) {
       return
     }
 
-    await appendAttachments(files)
+    void appendAttachments(files)
     event.target.value = ''
   }
 
@@ -452,13 +612,13 @@ const Status: React.FC<Props> = props => {
     }
   }
 
-  const statusPasted: ClipboardEventHandler<any> = async event => {
+  const statusPasted: ClipboardEventHandler<any> = event => {
     const imageItem = Array.from(event.clipboardData.items).find(item => item.type.startsWith('image/'))
     const pastedFile = imageItem?.getAsFile()
 
     if (pastedFile) {
       event.preventDefault()
-      await appendAttachments([pastedFile])
+      void appendAttachments([pastedFile])
       return
     }
 
@@ -466,86 +626,44 @@ const Status: React.FC<Props> = props => {
       return
     }
 
-    try {
-      const clipboardFile = await clipboardImageToFile()
-      if (!clipboardFile) {
-        return
+    event.preventDefault()
+    void (async () => {
+      try {
+        const clipboardFile = await clipboardImageToFile()
+        if (!clipboardFile) {
+          return
+        }
+
+        await appendAttachments([clipboardFile])
+      } catch {
+        // Ignore clipboard read failures when there is no normal paste payload.
       }
-
-      event.preventDefault()
-      await appendAttachments([clipboardFile])
-    } catch {
-      // Keep the default paste behavior when clipboard image access fails.
-    }
+    })()
   }
 
-  const hasDraggedFiles = (dataTransfer: DataTransfer) => {
-    if (dataTransfer.files.length > 0) {
-      return true
-    }
+  const asAttachmentDragEvent = (event: DragEvent<HTMLTextAreaElement>) => event as unknown as DragEvent<HTMLDivElement>
 
-    if (Array.from(dataTransfer.items ?? []).some(item => item.kind === 'file')) {
-      return true
-    }
-
-    return Array.from(dataTransfer.types).some(type => type === 'Files' || type === 'public.file-url')
+  const textareaAttachmentDragEnter: DragEventHandler<HTMLTextAreaElement> = event => {
+    props.onAttachmentDragEnter?.(asAttachmentDragEvent(event))
+    event.stopPropagation()
   }
 
-  const attachmentDragEnter: DragEventHandler<HTMLDivElement> = event => {
-    if (!hasDraggedFiles(event.dataTransfer)) {
-      return
-    }
-
-    event.preventDefault()
-    dragDepthRef.current += 1
-    setDraggingAttachment(true)
+  const textareaAttachmentDragOver: DragEventHandler<HTMLTextAreaElement> = event => {
+    props.onAttachmentDragOver?.(asAttachmentDragEvent(event))
+    event.stopPropagation()
   }
 
-  const attachmentDragOver: DragEventHandler<HTMLDivElement> = event => {
-    if (!hasDraggedFiles(event.dataTransfer)) {
-      return
-    }
-
-    event.preventDefault()
-    event.dataTransfer.dropEffect = 'copy'
+  const textareaAttachmentDragLeave: DragEventHandler<HTMLTextAreaElement> = event => {
+    props.onAttachmentDragLeave?.(asAttachmentDragEvent(event))
+    event.stopPropagation()
   }
 
-  const attachmentDragLeave: DragEventHandler<HTMLDivElement> = event => {
-    if (!hasDraggedFiles(event.dataTransfer)) {
-      return
-    }
-
-    event.preventDefault()
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
-    if (dragDepthRef.current === 0) {
-      setDraggingAttachment(false)
-    }
+  const textareaAttachmentDropped: DragEventHandler<HTMLTextAreaElement> = event => {
+    props.onAttachmentDrop?.(asAttachmentDragEvent(event))
+    event.stopPropagation()
   }
 
-  const attachmentDropped: DragEventHandler<HTMLDivElement> = async event => {
-    if (!hasDraggedFiles(event.dataTransfer)) {
-      return
-    }
-
-    event.preventDefault()
-    dragDepthRef.current = 0
-    setDraggingAttachment(false)
-    const files =
-      event.dataTransfer.files.length > 0
-        ? Array.from(event.dataTransfer.files)
-        : Array.from(event.dataTransfer.items)
-            .filter(item => item.kind === 'file')
-            .map(item => item.getAsFile())
-            .filter((file): file is File => file !== null)
-    if (files.length === 0) {
-      return
-    }
-
-    await appendAttachments(files)
-  }
-
-  const usingExternalDropzone = typeof props.setAttachmentDropHandler === 'function'
-  const dropzoneActive = props.draggingAttachment ?? draggingAttachment
+  const dropzoneActive = Boolean(props.draggingAttachment)
 
   const removeAttachment = (index: number) => {
     setFormValue(current =>
@@ -676,28 +794,35 @@ const Status: React.FC<Props> = props => {
 
   return (
     <>
-      <div
-        className={dropzoneActive ? 'compose-dropzone dragging' : 'compose-dropzone'}
-        onDragEnter={usingExternalDropzone ? undefined : attachmentDragEnter}
-        onDragOver={usingExternalDropzone ? undefined : attachmentDragOver}
-        onDragLeave={usingExternalDropzone ? undefined : attachmentDragLeave}
-        onDrop={usingExternalDropzone ? undefined : attachmentDropped}
-      >
-        <Form fluid model={model} ref={formRef} onChange={setFormValue} onCheck={setFormError} formValue={formValue}>
+      <div className={dropzoneActive ? 'compose-dropzone dragging' : 'compose-dropzone'}>
         {cw && (
-          <Form.Group controlId="spoiler">
-            <Form.Control name="spoiler" ref={cwRef} placeholder={formatMessage({ id: 'compose.spoiler.placeholder' })} />
-          </Form.Group>
+          <div style={{ marginBottom: '4px' }}>
+            <Input
+              inputRef={cwRef}
+              onChange={value => {
+                setFormError({})
+                setFormValue(current => Object.assign({}, current, { spoiler: value }))
+              }}
+              placeholder={formatMessage({ id: 'compose.spoiler.placeholder' })}
+              value={formValue.spoiler}
+            />
+          </div>
         )}
 
-        <Form.Group controlId="status" style={{ position: 'relative', marginBottom: '4px' }}>
-          {/** @ts-ignore **/}
-          <Form.Control
+        <div style={{ position: 'relative', marginBottom: '4px' }}>
+          <Textarea
             rows={5}
-            name="status"
-            accepter={Textarea}
             ref={statusRef}
+            value={formValue.status}
+            onChange={value => {
+              setFormError({})
+              setFormValue(current => Object.assign({}, current, { status: value }))
+            }}
             onPaste={statusPasted}
+            onDragEnter={textareaAttachmentDragEnter}
+            onDragOver={textareaAttachmentDragOver}
+            onDragLeave={textareaAttachmentDragLeave}
+            onDrop={textareaAttachmentDropped}
             placeholder={formatMessage({ id: 'compose.status.placeholder' })}
             emojis={customEmojis}
             client={props.client}
@@ -726,13 +851,41 @@ const Status: React.FC<Props> = props => {
               )}
             </div>
           )}
-        </Form.Group>
-        {formValue.poll && <Form.Control name="poll" accepter={PollInputControl} fieldError={formError.poll} />}
-        {formValue.scheduled_at && <Form.Control name="scheduled_at" accepter={DatePicker} format="yyyy-MM-dd HH:mm" />}
+          {formError.status ? <ErrorMessage>{formError.status}</ErrorMessage> : null}
+        </div>
+        {formValue.poll && (
+          <PollInputControl
+            fieldError={formError.poll}
+            onChange={poll => {
+              setFormError({})
+              setFormValue(current => Object.assign({}, current, { poll }))
+            }}
+            value={formValue.poll}
+          />
+        )}
+        {formValue.scheduled_at && (
+          <div style={{ marginBottom: '4px' }}>
+            <ScheduleInputControl
+              onChange={scheduled_at => {
+                setFormError({})
+                setFormValue(current => Object.assign({}, current, { scheduled_at }))
+              }}
+              value={formValue.scheduled_at}
+            />
+            {formError.scheduled_at ? <ErrorMessage>{formError.scheduled_at}</ErrorMessage> : null}
+          </div>
+        )}
 
-        <Form.Group controlId="actions" style={{ marginBottom: '4px' }}>
+        <div style={{ marginBottom: '4px' }}>
           <ButtonToolbar>
-            <Input name="attachments" type="file" style={{ display: 'none' }} ref={uploaderRef} onChange={fileChanged} multiple />
+            <input
+              ref={uploaderRef}
+              type="file"
+              style={{ display: 'none' }}
+              onChange={fileChanged}
+              multiple
+              accept="image/*,video/*,.jpg,.jpeg,.png,.gif,.webp,.bmp,.avif,.heic,.heif,.mp4,.mov,.m4v,.webm,.mkv"
+            />
             <Button appearance="subtle" onClick={selectFile}>
               <Icon as={BsPaperclip} style={{ fontSize: '1.1em' }} />
             </Button>
@@ -756,19 +909,22 @@ const Status: React.FC<Props> = props => {
               <Icon as={BsClock} style={{ fontSize: '1.1em' }} />
             </Button>
           </ButtonToolbar>
-        </Form.Group>
+        </div>
         {formValue.attachments?.length > 0 && (
-          <Form.Group controlId="nsfw" style={{ marginBottom: '4px' }}>
-            <Form.Control
-              name="nsfw"
-              accepter={Toggle}
+          <div style={{ marginBottom: '4px' }}>
+            <Toggle
               checkedChildren={<FormattedMessage id="compose.nsfw.sensitive" />}
+              checked={Boolean(formValue.nsfw)}
+              onChange={value => {
+                setFormError({})
+                setFormValue(current => Object.assign({}, current, { nsfw: value }))
+              }}
               unCheckedChildren={<FormattedMessage id="compose.nsfw.not_sensitive" />}
             />
-          </Form.Group>
+          </div>
         )}
 
-        <Form.Group controlId="attachments-preview" style={{ marginBottom: '4px' }}>
+        <div style={{ marginBottom: '4px' }}>
           <div>
             {formValue.attachments?.map((media, index) => (
               <div key={index} style={{ position: 'relative' }}>
@@ -788,7 +944,8 @@ const Status: React.FC<Props> = props => {
                 />
 
                 <img
-                  src={media.preview_url}
+                  src={attachmentPreviewUrl(media as Entity.Attachment)}
+                  alt={media.description ? media.description : media.id}
                   style={{
                     width: '100%',
                     height: '140px',
@@ -801,8 +958,8 @@ const Status: React.FC<Props> = props => {
               </div>
             ))}
           </div>
-        </Form.Group>
-        <Form.Group>
+        </div>
+        <div>
           <ButtonToolbar style={{ justifyContent: 'flex-end' }}>
             {(props.in_reply_to || props.edit_target || props.quote_target) && (
               <Button onClick={clear}>
@@ -813,8 +970,7 @@ const Status: React.FC<Props> = props => {
               {postMessage(props.in_reply_to, props.edit_target, props.quote_target)}
             </Button>
           </ButtonToolbar>
-        </Form.Group>
-        </Form>
+        </div>
       </div>
       <EditMedia
         opened={editMediaModal}
@@ -872,20 +1028,30 @@ const isOwnAccountMention = (acct: string, username: string, domain: string) => 
   return ownMentions.includes(normalized)
 }
 
-const PollInputControl: FormControlProps<Poll, any> = ({ value, onChange, fieldError }) => {
+type PollInputControlProps = {
+  fieldError?: PollError
+  onChange: (value: Poll) => void
+  value: Poll
+}
+
+const PollInputControl = ({ value, onChange, fieldError }: PollInputControlProps) => {
   const { formatMessage } = useIntl()
-  const [poll, setPoll] = useState<Poll>(value)
-  const errors = fieldError ? fieldError.object : {}
+  const [poll, setPoll] = useState<Poll>(value ?? defaultPoll())
+  const errors = fieldError ?? {}
 
   const expiresList = [
-    { label: formatMessage({ id: 'compose.poll.5min' }), value: 300 },
-    { label: formatMessage({ id: 'compose.poll.30min' }), value: 1800 },
-    { label: formatMessage({ id: 'compose.poll.1h' }), value: 3600 },
-    { label: formatMessage({ id: 'compose.poll.6h' }), value: 21600 },
-    { label: formatMessage({ id: 'compose.poll.1d' }), value: 86400 },
-    { label: formatMessage({ id: 'compose.poll.3d' }), value: 259200 },
-    { label: formatMessage({ id: 'compose.poll.7d' }), value: 604800 }
+    { label: formatMessage({ id: 'compose.poll.5min' }), value: '300' },
+    { label: formatMessage({ id: 'compose.poll.30min' }), value: '1800' },
+    { label: formatMessage({ id: 'compose.poll.1h' }), value: '3600' },
+    { label: formatMessage({ id: 'compose.poll.6h' }), value: '21600' },
+    { label: formatMessage({ id: 'compose.poll.1d' }), value: '86400' },
+    { label: formatMessage({ id: 'compose.poll.3d' }), value: '259200' },
+    { label: formatMessage({ id: 'compose.poll.7d' }), value: '604800' }
   ]
+
+  useEffect(() => {
+    setPoll(value ?? defaultPoll())
+  }, [value])
 
   const handleChangePoll = (nextPoll: Poll) => {
     setPoll(nextPoll)
@@ -921,7 +1087,7 @@ const PollInputControl: FormControlProps<Poll, any> = ({ value, onChange, fieldE
 
   return (
     <>
-      <Form.Group controlId="poll">
+      <div style={{ marginBottom: '4px' }}>
         {poll.options.map((option, index) => (
           <div key={index}>
             <FlexboxGrid align="middle">
@@ -935,23 +1101,19 @@ const PollInputControl: FormControlProps<Poll, any> = ({ value, onChange, fieldE
                 </Button>
               </FlexboxGrid.Item>
             </FlexboxGrid>
-            {errors.options?.array[index] ? <ErrorMessage>{errors.options?.array[index].errorMessage}</ErrorMessage> : null}
+            {errors.options?.[index] ? <ErrorMessage>{errors.options[index]}</ErrorMessage> : null}
           </div>
         ))}
-      </Form.Group>
-      <Form.Group controlId="meta">
+        {errors.general ? <ErrorMessage>{errors.general}</ErrorMessage> : null}
+      </div>
+      <div style={{ marginBottom: '4px' }}>
         <FlexboxGrid align="middle" justify="space-between">
           <FlexboxGrid.Item>
             <Toggle
               checkedChildren={<FormattedMessage id="compose.poll.multiple" />}
               unCheckedChildren={<FormattedMessage id="compose.poll.simple" />}
-              onChange={value =>
-                setPoll(current =>
-                  Object.assign({}, current, {
-                    multiple: value
-                  })
-                )
-              }
+              checked={poll.multiple}
+              onChange={value => handleChangePoll(Object.assign({}, poll, { multiple: value }))}
             />
           </FlexboxGrid.Item>
           <FlexboxGrid.Item>
@@ -960,20 +1122,100 @@ const PollInputControl: FormControlProps<Poll, any> = ({ value, onChange, fieldE
             </Button>
           </FlexboxGrid.Item>
           <FlexboxGrid.Item>
-            <InputPicker
-              data={expiresList}
-              value={poll.expires_in}
-              cleanable={false}
-              onChange={value => setPoll(current => Object.assign({}, current, { expires_in: value }))}
+            <FormSelectControl
+              options={expiresList}
+              value={poll.expires_in.toString()}
+              onChange={value => {
+                if (!value) {
+                  return
+                }
+
+                handleChangePoll(Object.assign({}, poll, { expires_in: Number(value) }))
+              }}
               style={{ width: '100px' }}
             />
           </FlexboxGrid.Item>
         </FlexboxGrid>
-      </Form.Group>
+        {errors.expires_in ? <ErrorMessage>{errors.expires_in}</ErrorMessage> : null}
+      </div>
     </>
   )
 }
 
+const formatDateTimeLocal = (value?: Date) => {
+  if (!value) {
+    return ''
+  }
+
+  const year = value.getFullYear()
+  const month = `${value.getMonth() + 1}`.padStart(2, '0')
+  const day = `${value.getDate()}`.padStart(2, '0')
+  const hours = `${value.getHours()}`.padStart(2, '0')
+  const minutes = `${value.getMinutes()}`.padStart(2, '0')
+
+  return `${year}-${month}-${day}T${hours}:${minutes}`
+}
+
+type ScheduleInputControlProps = {
+  onChange: (value?: Date) => void
+  value?: Date
+}
+
+const ScheduleInputControl = ({ value, onChange }: ScheduleInputControlProps) => (
+  <input
+    type="datetime-local"
+    value={formatDateTimeLocal(value)}
+    onChange={event => {
+      const nextValue = event.target.value
+      onChange(nextValue ? new Date(nextValue) : undefined)
+    }}
+  />
+)
+
 const ErrorMessage = ({ children }) => <span style={{ color: 'red' }}>{children}</span>
+
+const validateFormValue = (formValue: FormValue): FormError => {
+  const errors: FormError = {}
+
+  if (formValue.status.trim().length === 0) {
+    errors.status = 'This field is required.'
+  }
+
+  if (formValue.poll) {
+    const pollErrors: PollError = {}
+    const optionErrors = formValue.poll.options.map(option => (option.trim().length === 0 ? 'Required' : null))
+
+    if (optionErrors.some(Boolean)) {
+      pollErrors.options = optionErrors
+    }
+
+    if (formValue.poll.options.length < 2) {
+      pollErrors.general = 'Minimum 2 choices required'
+    }
+
+    if (!Number.isInteger(formValue.poll.expires_in)) {
+      pollErrors.expires_in = 'Must be a number'
+    } else if (formValue.poll.expires_in < 0) {
+      pollErrors.expires_in = 'Must be greater than 0'
+    }
+
+    if (Object.keys(pollErrors).length > 0) {
+      errors.poll = pollErrors
+    }
+  }
+
+  if (formValue.scheduled_at) {
+    const limit = new Date()
+    limit.setMinutes(limit.getMinutes() + 5)
+    if (formValue.scheduled_at <= limit) {
+      errors.scheduled_at = 'Must be at least 5 minutes in the future'
+    }
+  }
+
+  return errors
+}
+
+const hasFormError = (formError: FormError) =>
+  Boolean(formError.status || formError.scheduled_at || formError.poll?.general || formError.poll?.expires_in || formError.poll?.options?.some(Boolean))
 
 export default Status

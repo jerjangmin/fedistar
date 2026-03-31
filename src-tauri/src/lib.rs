@@ -13,6 +13,7 @@ use std::{
     thread,
 };
 use tauri::{async_runtime::Mutex, AppHandle, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use url::Url;
 mod database;
 mod entities;
@@ -704,7 +705,6 @@ async fn switch_devtools(app_handle: AppHandle) -> () {
             .get_webview_window("main")
             .expect("Failed to get main window");
         window.open_devtools();
-        window.close_devtools();
     }
     ()
 }
@@ -884,6 +884,30 @@ async fn download_media(media_url: String) -> Result<String, String> {
         .map_err(|err| err.to_string())?;
 
     Ok(output_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn copy_image_to_clipboard(app_handle: AppHandle, image_url: String) -> Result<(), String> {
+    let response = Client::new()
+        .get(image_url.as_str())
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to download image: {}", response.status()));
+    }
+
+    let bytes = response.bytes().await.map_err(|err| err.to_string())?;
+    let decoded_image = image::load_from_memory(bytes.as_ref()).map_err(|err| err.to_string())?;
+    let rgba = decoded_image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let clipboard_image = tauri::image::Image::new_owned(rgba.into_raw(), width, height);
+
+    app_handle
+        .clipboard()
+        .write_image(&clipboard_image)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1104,6 +1128,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             update_show_replies,
             open_media,
             download_media,
+            copy_image_to_clipboard,
             list_fonts,
             get_timeline,
             get_instance,
@@ -1189,7 +1214,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let m = menu::set_menu(app_handle).expect("Failed to generate menu");
             Ok(m)
         })
-        .on_page_load(|window, _payload| {
+        .on_page_load(|_window, _payload| {
             #[cfg(not(target_os = "macos"))]
             {
                 let app = window.app_handle();

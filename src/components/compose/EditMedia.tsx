@@ -1,8 +1,8 @@
 import { Entity, MegalodonInterface } from 'megalodon'
 import Image from 'next/image'
-import { forwardRef, useEffect, useRef, useState } from 'react'
+import { forwardRef, useEffect, useState } from 'react'
 import { FormattedMessage } from 'react-intl'
-import { Button, ButtonToolbar, FlexboxGrid, Form, Input, Modal, Schema } from 'rsuite'
+import { Button, ButtonToolbar, FlexboxGrid, Input, Modal } from 'rsuite'
 
 type Props = {
   attachment: Entity.Attachment | null
@@ -15,18 +15,13 @@ type FormValue = {
   description: string
 }
 
-const model = Schema.Model({
-  description: Schema.Types.StringType().isRequired('This field is required').maxLength(1500)
-})
-
 export default function EditMedia(props: Props) {
   const [formValue, setFormValue] = useState<FormValue>({
     description: ''
   })
+  const [formError, setFormError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [attachment, setAttachment] = useState<Entity.Attachment | null>(null)
-
-  const formRef = useRef<any>(null)
 
   useEffect(() => {
     if (!props.attachment) {
@@ -45,23 +40,29 @@ export default function EditMedia(props: Props) {
           description: ''
         })
       }
+      setFormError(null)
     }
     f()
   }, [props.attachment, props.client])
 
-  const handleSubmit = async () => {
+  const handleSubmit = () => {
     if (loading) return
-    if (formRef === undefined || formRef.current === undefined) {
-      return
-    } else if (!formRef.current.check()) {
+    if (formValue.description.trim().length === 0) {
+      setFormError('This field is required')
       return
     }
+    if (formValue.description.length > 1500) {
+      setFormError('Must be 1500 characters or less')
+      return
+    }
+
+    setFormError(null)
     setLoading(true)
-    try {
-      await props.client.updateMedia(attachment.id, { description: formValue.description })
-    } finally {
-      setLoading(false)
-    }
+    void props.client
+      .updateMedia(attachment.id, { description: formValue.description })
+      .finally(() => {
+        setLoading(false)
+      })
   }
 
   return (
@@ -72,22 +73,25 @@ export default function EditMedia(props: Props) {
       <Modal.Body>
         <FlexboxGrid>
           <FlexboxGrid.Item colspan={8}>
-            <Form fluid model={model} onChange={setFormValue} formValue={formValue} ref={formRef}>
-              <Form.Group controlId="description">
-                <Form.ControlLabel>
-                  <FormattedMessage id="compose.edit_attachment.label" />
-                </Form.ControlLabel>
-                {/** @ts-ignore **/}
-                <Form.Control name="description" rows={5} accepter={Textarea} />
-              </Form.Group>
-              <Form.Group>
-                <ButtonToolbar style={{ justifyContent: 'flex-end' }}>
-                  <Button appearance="primary" type="submit" loading={loading} onClick={handleSubmit}>
-                    <FormattedMessage id="compose.edit_attachment.submit" />
-                  </Button>
-                </ButtonToolbar>
-              </Form.Group>
-            </Form>
+            <div>
+              <label style={{ display: 'block', marginBottom: '6px' }}>
+                <FormattedMessage id="compose.edit_attachment.label" />
+              </label>
+              <Textarea
+                rows={5}
+                value={formValue.description}
+                onChange={value => {
+                  setFormError(null)
+                  setFormValue({ description: value })
+                }}
+              />
+              {formError ? <span style={{ color: 'red' }}>{formError}</span> : null}
+              <ButtonToolbar style={{ justifyContent: 'flex-end', marginTop: '12px' }}>
+                <Button appearance="primary" type="button" loading={loading} onClick={handleSubmit}>
+                  <FormattedMessage id="compose.edit_attachment.submit" />
+                </Button>
+              </ButtonToolbar>
+            </div>
           </FlexboxGrid.Item>
           <FlexboxGrid.Item colspan={16}>
             <div style={{ height: '320px', width: '320px' }}>
@@ -100,4 +104,4 @@ export default function EditMedia(props: Props) {
   )
 }
 
-const Textarea = forwardRef<HTMLTextAreaElement>((props, ref) => <Input {...props} as="textarea" ref={ref} />)
+const Textarea = forwardRef<HTMLTextAreaElement, any>((props, ref) => <Input {...(props as any)} as="textarea" ref={ref} />)
