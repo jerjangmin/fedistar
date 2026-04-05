@@ -57,6 +57,7 @@ import { FormattedMessage, useIntl } from 'react-intl'
 import { Context } from 'src/theme'
 import { attachmentPreviewUrl } from 'src/utils/mediaAttachment'
 import FormSelectControl from 'src/components/ui/FormSelectControl'
+import { isSupportedAttachmentFile, normalizeUploadFile } from './uploadFile'
 
 type Props = {
   server: Server
@@ -106,22 +107,6 @@ type FormError = {
 }
 
 const MAX_ATTACHMENTS = 5
-const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
-  'jpg',
-  'jpeg',
-  'png',
-  'gif',
-  'webp',
-  'bmp',
-  'avif',
-  'heic',
-  'heif',
-  'mp4',
-  'mov',
-  'm4v',
-  'webm',
-  'mkv'
-])
 
 const isUsableUploadFile = (value: unknown): value is File => {
   if (!(value instanceof File)) {
@@ -436,19 +421,6 @@ const Status: React.FC<Props> = props => {
     }
   }
 
-  const isSupportedAttachment = (file: File) => {
-    if (file.type.includes('image') || file.type.includes('video')) {
-      return true
-    }
-
-    const extension = file.name.split('.').pop()?.toLowerCase()
-    if (!extension) {
-      return false
-    }
-
-    return SUPPORTED_ATTACHMENT_EXTENSIONS.has(extension)
-  }
-
   const uploadAttachmentDirect = useCallback(async (file: File): Promise<Entity.Attachment | Entity.AsyncAttachment> => {
     const endpoint =
       props.server.sns === 'firefish'
@@ -523,12 +495,12 @@ const Status: React.FC<Props> = props => {
           break
         }
 
-        if (!isSupportedAttachment(candidate)) {
+        if (!isSupportedAttachmentFile(candidate)) {
           toast.push(alert('error', formatMessage({ id: 'alert.validation_attachments_type' })), { placement: 'topStart' })
           continue
         }
 
-        uploadTargets.push(candidate)
+        uploadTargets.push(normalizeUploadFile(candidate))
         attachableCount += 1
       }
 
