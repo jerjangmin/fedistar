@@ -345,6 +345,15 @@ async fn sync_emoji_catalog_for_server(
     sqlite_pool: &sqlx::SqlitePool,
     server: &entities::Server,
 ) -> Result<(), String> {
+    let entries = fetch_emoji_catalog_for_server(server).await?;
+    database::replace_emoji_catalog_entries(sqlite_pool, &server.domain, &entries)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn fetch_emoji_catalog_for_server(
+    server: &entities::Server,
+) -> Result<Vec<entities::EmojiCatalogEntry>, String> {
     let sns = megalodon::SNS::from_str(server.sns.as_ref()).map_err(|e| e.to_string())?;
     let client = megalodon::generator(
         sns,
@@ -375,11 +384,7 @@ async fn sync_emoji_catalog_for_server(
         Err(err) => return Err(err.to_string()),
     };
 
-    database::replace_emoji_catalog_entries(sqlite_pool, &server.domain, &entries)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -432,8 +437,22 @@ async fn refresh_emoji_catalogs(sqlite_pool: State<'_, sqlx::SqlitePool>) -> Res
         .await
         .map_err(|e| e.to_string())?;
 
-    for (server, _) in servers {
-        if let Err(err) = sync_emoji_catalog_for_server(&sqlite_pool, &server).await {
+    // Fetch every server concurrently, then write sequentially to avoid SQLite lock contention.
+    let fetched = futures::future::join_all(servers.iter().map(|(server, _)| async move {
+        (server, fetch_emoji_catalog_for_server(server).await)
+    }))
+    .await;
+
+    for (server, result) in fetched {
+        let outcome = match result {
+            Ok(entries) => {
+                database::replace_emoji_catalog_entries(&sqlite_pool, &server.domain, &entries)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Err(err) => Err(err),
+        };
+        if let Err(err) = outcome {
             tracing::warn!(
                 "Failed to refresh emoji catalog for {}: {}",
                 server.domain,

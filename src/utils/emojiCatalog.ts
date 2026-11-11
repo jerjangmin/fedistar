@@ -31,9 +31,39 @@ export const loadEmojiCatalogEntries = async () => {
   setEmojiCatalogEntries(entries)
 }
 
-export const refreshEmojiCatalogEntries = async () => {
+export const EMOJI_CATALOG_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000
+const LAST_REFRESH_KEY = 'fedistar.emojiCatalog.lastRefreshedAt'
+
+export const isEmojiCatalogRefreshDue = (lastRefreshedAt: number | null, now: number, interval = EMOJI_CATALOG_REFRESH_INTERVAL_MS) =>
+  lastRefreshedAt === null || !Number.isFinite(lastRefreshedAt) || now - lastRefreshedAt >= interval || now < lastRefreshedAt
+
+const readLastRefreshedAt = (): number | null => {
+  try {
+    const raw = window.localStorage.getItem(LAST_REFRESH_KEY)
+    return raw === null ? null : Number(raw)
+  } catch {
+    return null
+  }
+}
+
+const writeLastRefreshedAt = (value: number) => {
+  try {
+    window.localStorage.setItem(LAST_REFRESH_KEY, String(value))
+  } catch {
+    // Ignore storage failures; the catalog will simply refresh again next launch.
+  }
+}
+
+// Fetches remote emoji lists in the background. The module-level map is swapped in place,
+// so later renders pick up new entries without remounting the app.
+export const refreshEmojiCatalogEntries = async ({ force = false } = {}) => {
+  if (!force && !isEmojiCatalogRefreshDue(readLastRefreshedAt(), Date.now())) {
+    return false
+  }
   await invoke('refresh_emoji_catalogs')
+  writeLastRefreshedAt(Date.now())
   await loadEmojiCatalogEntries()
+  return true
 }
 
 export const resolveEmojiCatalogUrl = (shortcode: string, originHint?: string | null): string | null => {

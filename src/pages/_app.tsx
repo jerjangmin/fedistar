@@ -6,29 +6,25 @@ import '../App.scss'
 import { invoke } from '@tauri-apps/api/core'
 import { LogicalPosition } from '@tauri-apps/api/dpi'
 import { Menu } from '@tauri-apps/api/menu/menu'
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import AppErrorBoundary from 'src/components/AppErrorBoundary'
 import { useTauriListen } from 'src/hooks/useTauriListen'
 import { IntlProviderWrapper } from 'src/i18n'
 import { RsuiteProviderWrapper } from 'src/theme'
-import { refreshEmojiCatalogEntries } from 'src/utils/emojiCatalog'
+import { loadEmojiCatalogEntries, refreshEmojiCatalogEntries } from 'src/utils/emojiCatalog'
 
 // This default export is required in a new `pages/_app.js` file.
 export default function MyApp({ Component, pageProps }: AppProps) {
-  const [emojiCatalogVersion, setEmojiCatalogVersion] = useState(0)
-
-  const loadEmojiCatalogs = () => {
-    void refreshEmojiCatalogEntries()
-      .then(() => {
-        setEmojiCatalogVersion(current => current + 1)
-      })
-      .catch(err => {
-        console.error(err)
-      })
+  // Never remount the page for emoji catalog updates: that discarded every timeline and
+  // reloaded them right after launch. Cached entries are used first, the network refresh runs in the background.
+  const refreshEmojiCatalogs = (force: boolean) => {
+    void refreshEmojiCatalogEntries({ force }).catch(err => {
+      console.error(err)
+    })
   }
 
   useTauriListen('updated-servers', () => {
-    loadEmojiCatalogs()
+    refreshEmojiCatalogs(true)
   })
 
   useEffect(() => {
@@ -103,7 +99,13 @@ export default function MyApp({ Component, pageProps }: AppProps) {
     window.addEventListener('unhandledrejection', handleUnhandledRejection)
     window.addEventListener('error', handleWindowError)
 
-    loadEmojiCatalogs()
+    void loadEmojiCatalogEntries()
+      .catch(err => {
+        console.error(err)
+      })
+      .finally(() => {
+        refreshEmojiCatalogs(false)
+      })
 
     return () => {
       document.removeEventListener('contextmenu', openAppContextMenu)
@@ -116,7 +118,7 @@ export default function MyApp({ Component, pageProps }: AppProps) {
     <AppErrorBoundary>
       <RsuiteProviderWrapper>
         <IntlProviderWrapper>
-          <Component key={emojiCatalogVersion} {...pageProps} />
+          <Component {...pageProps} />
         </IntlProviderWrapper>
       </RsuiteProviderWrapper>
     </AppErrorBoundary>
