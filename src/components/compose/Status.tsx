@@ -42,7 +42,6 @@ import {
 import { Entity, MegalodonInterface } from 'megalodon'
 import Picker from '@emoji-mart/react'
 import { invoke } from '@tauri-apps/api/core'
-import { readImage } from '@tauri-apps/plugin-clipboard-manager'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 
 import { data, mapCustomEmojiCategory } from 'src/utils/emojiData'
@@ -57,7 +56,15 @@ import { FormattedMessage, useIntl } from 'react-intl'
 import { Context } from 'src/theme'
 import { attachmentPreviewUrl } from 'src/utils/mediaAttachment'
 import FormSelectControl from 'src/components/ui/FormSelectControl'
-import { isSupportedAttachmentFile, normalizeUploadFile } from './uploadFile'
+import {
+  UPLOAD_IMAGE_MAX_WIDTH,
+  detectImageMimeType,
+  isSupportedAttachmentFile,
+  normalizeUploadFile,
+  resizeImageForUpload,
+  uploadTimeoutFor,
+  withTimeout
+} from './uploadFile'
 
 type Props = {
   server: Server
@@ -438,11 +445,25 @@ const Status: React.FC<Props> = props => {
       headers.Authorization = `Bearer ${props.account.access_token}`
     }
 
-    const response = await tauriFetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: formData
-    })
+    const controller = new AbortController()
+    const timeoutMs = uploadTimeoutFor(file)
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    let response: Response
+    try {
+      response = await tauriFetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: formData,
+        signal: controller.signal
+      })
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`native upload timed out after ${Math.round(timeoutMs / 1000)}s`, { cause: error })
+      }
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
 
     if (!response.ok) {
       let detail = `${response.status} ${response.statusText}`.trim()
@@ -509,11 +530,18 @@ const Status: React.FC<Props> = props => {
       }
 
       setLoading(true)
-      for (const file of uploadTargets) {
+      for (const target of uploadTargets) {
         let attachment: Entity.Attachment | Entity.AsyncAttachment
+        const file = await resizeImageForUpload(target)
+        if (file !== target) {
+          console.info('Resized attachment before upload', {
+            from: describeUploadCandidate(target),
+            to: describeUploadCandidate(file)
+          })
+        }
 
         try {
-          const res = await props.client.uploadMedia(file)
+          const res = await withTimeout(props.client.uploadMedia(file), uploadTimeoutFor(file), 'uploadMedia')
           attachment = res.data
         } catch (error) {
           console.error('uploadMedia failed, falling back to native upload', {
@@ -560,28 +588,16 @@ const Status: React.FC<Props> = props => {
   }
 
   const clipboardImageToFile = async () => {
-    const clipboardImage = await readImage()
-    try {
-      const size = await clipboardImage.size()
-      const rgba = await clipboardImage.rgba()
-      const canvas = document.createElement('canvas')
-      canvas.width = size.width
-      canvas.height = size.height
-      const context = canvas.getContext('2d')
-      if (!context) {
-        return null
-      }
-
-      context.putImageData(new ImageData(new Uint8ClampedArray(rgba), size.width, size.height), 0, 0)
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
-      if (!blob) {
-        return null
-      }
-
-      return new File([blob], `clipboard-${Date.now()}.png`, { type: 'image/png' })
-    } finally {
-      await clipboardImage.close()
+    // Decode, resize and encode natively so the full RGBA buffer never crosses IPC as JSON.
+    const encoded = await invoke<ArrayBuffer>('read_clipboard_image_for_upload', { maxWidth: UPLOAD_IMAGE_MAX_WIDTH })
+    const bytes = new Uint8Array(encoded)
+    const type = detectImageMimeType(bytes)
+    if (bytes.length === 0 || type.length === 0) {
+      return null
     }
+
+    const extension = type === 'image/png' ? 'png' : 'jpg'
+    return new File([bytes], `clipboard-${Date.now()}.${extension}`, { type })
   }
 
   const statusPasted: ClipboardEventHandler<any> = event => {

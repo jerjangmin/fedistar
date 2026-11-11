@@ -910,6 +910,63 @@ async fn copy_image_to_clipboard(app_handle: AppHandle, image_url: String) -> Re
         .map_err(|err| err.to_string())
 }
 
+fn encode_clipboard_image_for_upload(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    max_width: u32,
+) -> Result<Vec<u8>, String> {
+    let mut buffer = image::RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| "Clipboard image buffer has an unexpected size".to_string())?;
+
+    if max_width > 0 && width > max_width {
+        let target_height = ((height as u64 * max_width as u64) / width as u64).max(1) as u32;
+        buffer = image::imageops::resize(
+            &buffer,
+            max_width,
+            target_height,
+            image::imageops::FilterType::CatmullRom,
+        );
+    }
+
+    let has_alpha = buffer.pixels().any(|pixel| pixel.0[3] < 255);
+    let mut out = std::io::Cursor::new(Vec::new());
+    if has_alpha {
+        image::DynamicImage::ImageRgba8(buffer)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .map_err(|err| err.to_string())?;
+    } else {
+        let rgb = image::DynamicImage::ImageRgba8(buffer).to_rgb8();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+            .encode_image(&rgb)
+            .map_err(|err| err.to_string())?;
+    }
+
+    Ok(out.into_inner())
+}
+
+#[tauri::command]
+async fn read_clipboard_image_for_upload(
+    app_handle: AppHandle,
+    max_width: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let (rgba, width, height) = {
+        let image = app_handle
+            .clipboard()
+            .read_image()
+            .map_err(|err| err.to_string())?;
+        (image.rgba().to_vec(), image.width(), image.height())
+    };
+
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        encode_clipboard_image_for_upload(rgba, width, height, max_width)
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[tauri::command]
 async fn list_fonts() -> Result<Vec<String>, String> {
     let font_source = SystemSource::new();
@@ -1129,6 +1186,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             open_media,
             download_media,
             copy_image_to_clipboard,
+            read_clipboard_image_for_upload,
             list_fonts,
             get_timeline,
             get_instance,
@@ -1235,4 +1293,29 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .expect("error while running tauri application");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod clipboard_upload_tests {
+    use super::encode_clipboard_image_for_upload;
+
+    #[test]
+    fn shrinks_wide_opaque_image_to_jpeg() {
+        let (w, h) = (2120u32, 1000u32);
+        let bytes = encode_clipboard_image_for_upload(vec![200u8; (w * h * 4) as usize], w, h, 1060).unwrap();
+        let rgba: Vec<u8> = (0..w * h).flat_map(|_| [10u8, 20, 30, 255]).collect();
+        let bytes2 = encode_clipboard_image_for_upload(rgba, w, h, 1060).unwrap();
+        assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']); // alpha 200 -> PNG
+        assert_eq!(&bytes2[..2], &[0xff, 0xd8]);
+        let decoded = image::load_from_memory(&bytes2).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1060, 500));
+    }
+
+    #[test]
+    fn keeps_small_image_dimensions() {
+        let rgba: Vec<u8> = (0..800 * 600).flat_map(|_| [1u8, 2, 3, 255]).collect();
+        let bytes = encode_clipboard_image_for_upload(rgba, 800, 600, 1060).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (800, 600));
+    }
 }

@@ -25,4 +25,6 @@ out
 
 tsconfig.tsbuildinfo
 /thirdparty.json
-/src-tauri/thirdparty.json
+/src-tauri/thirdparty.jsonsrc-tauri/target
+out
+.next
