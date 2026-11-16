@@ -206,11 +206,30 @@ export default function TimelineColumn(props: Props) {
     }
   }, [])
 
+  // replyOpened is a ref, so closing a reply/edit form never re-rendered this component and the
+  // statuses held back while it was open (including the user's own reply from streaming) stayed hidden.
+  // Closing the form now requests a flush, which runs after the next render with fresh state.
+  const [unreadFlushRequest, setUnreadFlushRequest] = useState(0)
+  const setReplyOpened = useCallback((opened: boolean) => {
+    const wasOpened = replyOpened.current
+    replyOpened.current = opened
+    if (wasOpened && !opened) {
+      setUnreadFlushRequest(current => current + 1)
+    }
+  }, [])
+
   useEffect(() => {
-    if (!replyOpened.current) {
+    if (unreadFlushRequest === 0 || replyOpened.current) {
+      return
+    }
+    if (scrollerRef.current && scrollerRef.current.scrollTop > 10) {
+      // Not at the top: atTopStateChange flushes them once the user scrolls back up.
+      return
+    }
+    if (unreadStatuses.length > 0) {
       prependUnreads()
     }
-  }, [replyOpened.current])
+  }, [unreadFlushRequest])
 
   const loadFilter = async (tl: Timeline, client: MegalodonInterface): Promise<Array<Entity.Filter>> => {
     try {
@@ -536,7 +555,7 @@ export default function TimelineColumn(props: Props) {
                       columnWidth={props.timeline.column_width}
                       updateStatus={status => setStatuses(current => updateStatus(current, status))}
                       openMedia={props.openMedia}
-                      setReplyOpened={opened => (replyOpened.current = opened)}
+                      setReplyOpened={setReplyOpened}
                       setStatusDetail={setStatusDetail}
                       setAccountDetail={setAccountDetail}
                       setTagDetail={setTagDetail}

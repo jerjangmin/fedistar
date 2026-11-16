@@ -1,4 +1,4 @@
-import { HTMLAttributes, MouseEventHandler, useEffect, useState } from 'react'
+import { HTMLAttributes, MouseEventHandler, useEffect, useRef, useState } from 'react'
 import { Entity, MegalodonInterface } from 'megalodon'
 import { FlexboxGrid, Avatar, Button, useToaster, Notification } from 'rsuite'
 import { Icon } from '@rsuite/icons'
@@ -54,19 +54,35 @@ const Status: React.FC<Props> = props => {
 
   const toaster = useToaster()
 
+  // Only the status that reported an open form reports it closed, so mounting other
+  // statuses does not clear the timeline's reply-open state.
+  const reportedReplyOpen = useRef(false)
   useEffect(() => {
     if (props.setReplyOpened) {
       if (showReply) {
-        props.setReplyOpened(showReply)
+        reportedReplyOpen.current = true
+        props.setReplyOpened(true)
         setShowEdit(false)
       } else if (showEdit) {
-        props.setReplyOpened(showEdit)
+        reportedReplyOpen.current = true
+        props.setReplyOpened(true)
         setShowReply(false)
-      } else {
+      } else if (reportedReplyOpen.current) {
+        reportedReplyOpen.current = false
         props.setReplyOpened(false)
       }
     }
   }, [showReply, showEdit])
+
+  useEffect(
+    () => () => {
+      if (reportedReplyOpen.current) {
+        reportedReplyOpen.current = false
+        props.setReplyOpened?.(false)
+      }
+    },
+    []
+  )
 
   const statusClicked: MouseEventHandler<HTMLDivElement> = async e => {
     // Check username
