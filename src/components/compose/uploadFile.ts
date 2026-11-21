@@ -42,8 +42,11 @@ export const normalizeUploadFile = (file: File) => {
   })
 }
 
-export const UPLOAD_IMAGE_MAX_WIDTH = 1060
-export const UPLOAD_JPEG_QUALITY = 0.85
+// 1060 CSS px shown sharply on Retina (2x) displays.
+export const UPLOAD_IMAGE_MAX_WIDTH = 2120
+export const UPLOAD_JPEG_QUALITY = 0.9
+// Opaque PNG sources (screenshots, text) stay PNG when that costs at most this much over JPEG.
+export const PNG_PREFERENCE_RATIO = 1.5
 export const IMAGE_UPLOAD_TIMEOUT_MS = 60_000
 export const VIDEO_UPLOAD_TIMEOUT_MS = 300_000
 
@@ -156,10 +159,56 @@ const hasTransparentPixel = (context: CanvasRenderingContext2D, width: number, h
   return false
 }
 
+const canvasToBlob = (canvas: HTMLCanvasElement, type: string, quality?: number) =>
+  new Promise<Blob | null>(resolve => canvas.toBlob(resolve, type, quality))
+
+// Halves the image step by step before the final resize. A single large-ratio drawImage
+// samples too few source pixels and leaves the result soft and aliased.
+const drawDownscaled = (image: HTMLImageElement, width: number, height: number) => {
+  let source: CanvasImageSource = image
+  let sourceWidth = image.naturalWidth
+  let sourceHeight = image.naturalHeight
+  const intermediates: Array<HTMLCanvasElement> = []
+
+  while (sourceWidth / 2 >= width) {
+    const step = document.createElement('canvas')
+    step.width = Math.round(sourceWidth / 2)
+    step.height = Math.round(sourceHeight / 2)
+    const stepContext = step.getContext('2d')
+    if (!stepContext) {
+      break
+    }
+    stepContext.imageSmoothingEnabled = true
+    stepContext.imageSmoothingQuality = 'high'
+    stepContext.drawImage(source, 0, 0, step.width, step.height)
+    intermediates.push(step)
+    source = step
+    sourceWidth = step.width
+    sourceHeight = step.height
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) {
+    return null
+  }
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(source, 0, 0, width, height)
+  intermediates.forEach(step => {
+    step.width = 0
+    step.height = 0
+  })
+  return canvas
+}
+
 /**
  * Shrinks images wider than maxWidth before upload, keeping the aspect ratio.
  * Videos, animated images, small images, and undecodable files are returned unchanged.
- * Images with transparency stay PNG; everything else becomes JPEG.
+ * Transparent images stay PNG, opaque PNGs stay PNG when it is not much larger, the rest become JPEG.
+ * If the re-encoded file is not smaller than the original, the original is uploaded.
  */
 export const resizeImageForUpload = async (file: File, maxWidth = UPLOAD_IMAGE_MAX_WIDTH): Promise<File> => {
   const type = inferAttachmentMimeType(file)
@@ -180,29 +229,35 @@ export const resizeImageForUpload = async (file: File, maxWidth = UPLOAD_IMAGE_M
       return file
     }
 
-    const canvas = document.createElement('canvas')
-    canvas.width = target.width
-    canvas.height = target.height
-    const context = canvas.getContext('2d', { willReadFrequently: true })
-    if (!context) {
+    const canvas = drawDownscaled(image, target.width, target.height)
+    const context = canvas?.getContext('2d', { willReadFrequently: true })
+    if (!canvas || !context) {
       return file
     }
-    context.imageSmoothingEnabled = true
-    context.imageSmoothingQuality = 'high'
-    context.drawImage(image, 0, 0, target.width, target.height)
 
-    const keepAlpha = ALPHA_CAPABLE_TYPES.has(type) && hasTransparentPixel(context, target.width, target.height)
-    const outputType = keepAlpha ? 'image/png' : 'image/jpeg'
-    const blob = await new Promise<Blob | null>(resolve =>
-      canvas.toBlob(resolve, outputType, outputType === 'image/jpeg' ? UPLOAD_JPEG_QUALITY : undefined)
-    )
+    let outputType = 'image/jpeg'
+    let blob: Blob | null
+    if (ALPHA_CAPABLE_TYPES.has(type) && hasTransparentPixel(context, target.width, target.height)) {
+      outputType = 'image/png'
+      blob = await canvasToBlob(canvas, 'image/png')
+    } else {
+      blob = await canvasToBlob(canvas, 'image/jpeg', UPLOAD_JPEG_QUALITY)
+      if (type === 'image/png' && blob) {
+        // Screenshots and text compress well as PNG and avoid JPEG ringing around glyphs.
+        const png = await canvasToBlob(canvas, 'image/png')
+        if (png && png.size <= blob.size * PNG_PREFERENCE_RATIO) {
+          outputType = 'image/png'
+          blob = png
+        }
+      }
+    }
     canvas.width = 0
     canvas.height = 0
-    if (!blob) {
+    if (!blob || blob.size >= file.size) {
       return file
     }
 
-    return new File([blob], replaceExtension(file.name || 'image', keepAlpha ? 'png' : 'jpg'), {
+    return new File([blob], replaceExtension(file.name || 'image', outputType === 'image/png' ? 'png' : 'jpg'), {
       type: outputType,
       lastModified: file.lastModified
     })

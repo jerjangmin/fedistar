@@ -530,8 +530,8 @@ const Status: React.FC<Props> = props => {
       }
 
       setLoading(true)
-      for (const target of uploadTargets) {
-        let attachment: Entity.Attachment | Entity.AsyncAttachment
+      // Resize and upload every file at once, but append attachments in the order they were picked.
+      const uploads = uploadTargets.map(async target => {
         const file = await resizeImageForUpload(target)
         if (file !== target) {
           console.info('Resized attachment before upload', {
@@ -542,21 +542,26 @@ const Status: React.FC<Props> = props => {
 
         try {
           const res = await withTimeout(props.client.uploadMedia(file), uploadTimeoutFor(file), 'uploadMedia')
-          attachment = res.data
+          return res.data
         } catch (error) {
           console.error('uploadMedia failed, falling back to native upload', {
             error,
             file: describeUploadCandidate(file)
           })
-          attachment = await uploadAttachmentDirect(file)
+          return uploadAttachmentDirect(file)
         }
+      })
 
-        setFormValue(current => {
-          if (current.attachments) {
-            return Object.assign({}, current, { attachments: [...current.attachments, attachment] })
-          }
-          return Object.assign({}, current, { attachments: [attachment] })
-        })
+      const results = await Promise.allSettled(uploads)
+      const attachments = results.flatMap(result => (result.status === 'fulfilled' ? [result.value] : []))
+      if (attachments.length > 0) {
+        setFormValue(current =>
+          Object.assign({}, current, { attachments: [...(current.attachments ?? []), ...attachments] })
+        )
+      }
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (failed) {
+        throw failed.reason
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)

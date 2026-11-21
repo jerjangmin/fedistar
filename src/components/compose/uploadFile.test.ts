@@ -41,13 +41,14 @@ describe('compose upload file helpers', () => {
 })
 
 describe('upload image resize helpers', () => {
-  it('scales wide images down to 1060px keeping the aspect ratio', () => {
-    expect(computeResizeDimensions(3024, 4032)).toEqual({ width: 1060, height: 1413 })
-    expect(computeResizeDimensions(2880, 1800)).toEqual({ width: 1060, height: 663 })
+  it('scales wide images down to the max width keeping the aspect ratio', () => {
+    expect(computeResizeDimensions(3024, 4032, 1060)).toEqual({ width: 1060, height: 1413 })
+    expect(computeResizeDimensions(3024, 4032)).toEqual({ width: 2120, height: 2827 })
+    expect(computeResizeDimensions(2880, 1800, 1060)).toEqual({ width: 1060, height: 663 })
   })
 
   it('leaves images that already fit untouched', () => {
-    expect(computeResizeDimensions(1060, 3000)).toBeNull()
+    expect(computeResizeDimensions(2120, 3000)).toBeNull()
     expect(computeResizeDimensions(800, 600)).toBeNull()
   })
 

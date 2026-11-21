@@ -949,19 +949,31 @@ fn encode_clipboard_image_for_upload(
     }
 
     let has_alpha = buffer.pixels().any(|pixel| pixel.0[3] < 255);
-    let mut out = std::io::Cursor::new(Vec::new());
-    if has_alpha {
-        image::DynamicImage::ImageRgba8(buffer)
+    let encode_png = |buffer: &image::RgbaImage| -> Result<Vec<u8>, String> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(buffer.clone())
             .write_to(&mut out, image::ImageFormat::Png)
             .map_err(|err| err.to_string())?;
-    } else {
-        let rgb = image::DynamicImage::ImageRgba8(buffer).to_rgb8();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
-            .encode_image(&rgb)
-            .map_err(|err| err.to_string())?;
+        Ok(out.into_inner())
+    };
+    if has_alpha {
+        return encode_png(&buffer);
     }
 
-    Ok(out.into_inner())
+    let rgb = image::DynamicImage::ImageRgba8(buffer.clone()).to_rgb8();
+    let mut jpeg = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&rgb)
+        .map_err(|err| err.to_string())?;
+    let jpeg = jpeg.into_inner();
+
+    // Clipboard images are mostly screenshots: keep PNG (sharp text) unless it is much larger.
+    let png = encode_png(&buffer)?;
+    if png.len() * 2 <= jpeg.len() * 3 {
+        Ok(png)
+    } else {
+        Ok(jpeg)
+    }
 }
 
 #[tauri::command]
@@ -1325,9 +1337,25 @@ mod clipboard_upload_tests {
         let rgba: Vec<u8> = (0..w * h).flat_map(|_| [10u8, 20, 30, 255]).collect();
         let bytes2 = encode_clipboard_image_for_upload(rgba, w, h, 1060).unwrap();
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']); // alpha 200 -> PNG
-        assert_eq!(&bytes2[..2], &[0xff, 0xd8]);
+        // Flat colour compresses far better as PNG, so it stays PNG.
+        assert_eq!(&bytes2[..4], &[0x89, b'P', b'N', b'G']);
         let decoded = image::load_from_memory(&bytes2).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (1060, 500));
+    }
+
+    #[test]
+    fn noisy_opaque_image_becomes_jpeg() {
+        let (w, h) = (1200u32, 800u32);
+        let mut seed = 7u32;
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let v = (seed >> 16) as u8;
+                [v, v.wrapping_mul(3), v.wrapping_add(90), 255]
+            })
+            .collect();
+        let bytes = encode_clipboard_image_for_upload(rgba, w, h, 2120).unwrap();
+        assert_eq!(&bytes[..2], &[0xff, 0xd8]);
     }
 
     #[test]
